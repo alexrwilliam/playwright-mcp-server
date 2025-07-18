@@ -99,6 +99,55 @@ async def demo_browser_automation():
                 "success": True,
                 "data": "JVBERi0xLjQKJcfs..."  # base64 encoded PDF
             }
+        },
+        {
+            "tool": "is_visible",
+            "description": "Check if an element is visible",
+            "params": {"selector": "h1"},
+            "expected_result": {
+                "success": True,
+                "selector": "h1",
+                "visible": True
+            }
+        },
+        {
+            "tool": "wait_for_element",
+            "description": "Wait for an element to appear",
+            "params": {"selector": ".dynamic-content", "timeout": 5000},
+            "expected_result": {
+                "success": True,
+                "selector": ".dynamic-content",
+                "timeout": 5000
+            }
+        },
+        {
+            "tool": "check_checkbox",
+            "description": "Check a checkbox",
+            "params": {"selector": "input[type='checkbox']"},
+            "expected_result": {
+                "success": True,
+                "selector": "input[type='checkbox']",
+                "action": "checked"
+            }
+        },
+        {
+            "tool": "press_key",
+            "description": "Press a keyboard key",
+            "params": {"key": "Enter"},
+            "expected_result": {
+                "success": True,
+                "key": "Enter"
+            }
+        },
+        {
+            "tool": "get_element_bounding_box",
+            "description": "Get element position and dimensions",
+            "params": {"selector": "h1"},
+            "expected_result": {
+                "success": True,
+                "selector": "h1",
+                "bounding_box": {"x": 50, "y": 100, "width": 200, "height": 40}
+            }
         }
     ]
     
@@ -109,29 +158,60 @@ async def demo_browser_automation():
         print(f"   Expected Result: {json.dumps(example['expected_result'], indent=6)}")
         print()
     
-    print("=== Available Tools ===")
-    tools = [
-        "navigate(url: str) - Navigate to a URL",
-        "reload() - Reload the current page",
-        "go_back() - Go back in history",
-        "go_forward() - Go forward in history",
-        "click(selector: str) - Click an element",
-        "type_text(selector: str, text: str) - Type text into an element",
-        "fill(selector: str, value: str) - Fill an input field",
-        "select_option(selector: str, value: str) - Select an option",
-        "hover(selector: str) - Hover over an element",
-        "scroll(selector: str, x: int, y: int) - Scroll element",
-        "query_selector(selector: str) - Query for element",
-        "query_selector_all(selector: str) - Query for all matching elements",
-        "get_html() - Get page HTML",
-        "get_accessibility_snapshot() - Get accessibility tree",
-        "screenshot(selector: str, full_page: bool) - Take screenshot",
-        "pdf() - Generate PDF",
-        "evaluate(script: str) - Run JavaScript"
-    ]
+    print("=== Available Tools (33 total) ===")
+    tool_categories = {
+        "Navigation & Page Control": [
+            "navigate(url: str) - Navigate to a URL",
+            "reload() - Reload the current page", 
+            "go_back() - Go back in history",
+            "go_forward() - Go forward in history",
+            "wait_for_url(url_pattern: str, timeout: int) - Wait for URL to match pattern",
+            "wait_for_load_state(state: str, timeout: int) - Wait for page load states",
+            "set_viewport_size(width: int, height: int) - Set viewport dimensions"
+        ],
+        "Element Interaction": [
+            "click(selector: str) - Click an element",
+            "type_text(selector: str, text: str) - Type text into an element", 
+            "fill(selector: str, value: str) - Fill an input field",
+            "clear_text(selector: str) - Clear input field text",
+            "select_option(selector: str, value: str) - Select an option",
+            "hover(selector: str) - Hover over an element",
+            "scroll(selector: str, x: int, y: int) - Scroll element",
+            "press_key(key: str) - Press keyboard key"
+        ],
+        "Form Handling": [
+            "check_checkbox(selector: str) - Check a checkbox",
+            "uncheck_checkbox(selector: str) - Uncheck a checkbox", 
+            "upload_file(selector: str, file_path: str) - Upload file to input"
+        ],
+        "Element Discovery & Validation": [
+            "query_selector(selector: str) - Query for single element",
+            "query_selector_all(selector: str) - Query for all matching elements",
+            "is_visible(selector: str) - Check if element is visible",
+            "is_enabled(selector: str) - Check if element is enabled",
+            "wait_for_element(selector: str, timeout: int) - Wait for element to appear",
+            "get_element_bounding_box(selector: str) - Get element position and size",
+            "get_element_attributes(selector: str) - Get all element attributes",
+            "get_computed_style(selector: str, property: str) - Get CSS computed style"
+        ],
+        "Content & Snapshots": [
+            "get_html() - Get page HTML",
+            "get_accessibility_snapshot() - Get accessibility tree",
+            "screenshot(selector: str, full_page: bool) - Take screenshot",
+            "pdf() - Generate PDF of page"
+        ],
+        "JavaScript & Debugging": [
+            "evaluate(script: str) - Execute JavaScript in page context",
+            "wait_for_network_idle(timeout: int) - Wait for network activity to settle",
+            "get_page_errors() - Get JavaScript errors from page",
+            "get_console_logs() - Get console output from page"
+        ]
+    }
     
-    for tool in tools:
-        print(f"  • {tool}")
+    for category, tools in tool_categories.items():
+        print(f"\n{category}:")
+        for tool in tools:
+            print(f"  • {tool}")
     
     print("\n=== Usage Instructions ===")
     print("1. Install dependencies:")
@@ -139,8 +219,8 @@ async def demo_browser_automation():
     print("   playwright install")
     print()
     print("2. Run the server:")
-    print("   python -m playwright_mcp.server stdio          # For MCP clients")
-    print("   python -m playwright_mcp.server http --port 8000  # For HTTP API")
+    print("   playwright-mcp stdio          # For MCP clients")
+    print("   playwright-mcp http --port 8000  # For HTTP API")
     print()
     print("3. Connect from MCP clients:")
     print("   - Claude Desktop: Add to claude_desktop_config.json")
