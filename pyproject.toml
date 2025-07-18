@@ -43,9 +43,9 @@ dev = [
 playwright-mcp = "playwright_mcp.server:main"
 
 [project.urls]
-Homepage = "https://github.com/yourusername/playwright-mcp"
-Repository = "https://github.com/yourusername/playwright-mcp"
-Issues = "https://github.com/yourusername/playwright-mcp/issues"
+Homepage = "https://github.com/alexrwilliam/playwright-mcp-server"
+Repository = "https://github.com/alexrwilliam/playwright-mcp-server"
+Issues = "https://github.com/alexrwilliam/playwright-mcp-server/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]

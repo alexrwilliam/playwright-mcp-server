@@ -18,7 +18,7 @@ A minimal, robust Playwright MCP (Model Context Protocol) server that exposes co
 
 ```bash
 # Install directly from GitHub
-pip install git+https://github.com/yourusername/playwright-mcp.git
+pip install git+https://github.com/alexrwilliam/playwright-mcp-server.git
 
 # Install Playwright browsers
 playwright install
@@ -28,8 +28,8 @@ playwright install
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/playwright-mcp.git
-cd playwright-mcp
+git clone https://github.com/alexrwilliam/playwright-mcp-server.git
+cd playwright-mcp-server
 
 # Install in development mode
 pip install -e .
