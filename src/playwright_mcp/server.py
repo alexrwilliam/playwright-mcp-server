@@ -420,11 +420,9 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(description="Playwright MCP Server")
-    parser.add_argument("transport", choices=["stdio", "http"], help="Transport type")
     parser.add_argument("--headed", action="store_true", help="Run in headed mode")
     parser.add_argument("--browser", choices=["chromium", "firefox", "webkit"], 
                        default="chromium", help="Browser type")
-    parser.add_argument("--port", type=int, default=8000, help="Port for HTTP transport")
     parser.add_argument("--timeout", type=int, default=30000, help="Default timeout (ms)")
     
     args = parser.parse_args()
@@ -437,11 +435,8 @@ def main():
     # Setup logging
     logging.basicConfig(level=logging.INFO)
     
-    # Run the server
-    if args.transport == "stdio":
-        mcp.run()
-    elif args.transport == "http":
-        mcp.run(transport="streamable-http", port=args.port)
+    # Run the server using FastMCP's default behavior
+    mcp.run()
 
 
 if __name__ == "__main__":
