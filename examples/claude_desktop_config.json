@@ -1,0 +1,26 @@
+{
+  "mcpServers": {
+    "playwright": {
+      "command": "python",
+      "args": [
+        "-m",
+        "playwright_mcp.server",
+        "stdio"
+      ],
+      "env": {
+        "PLAYWRIGHT_BROWSERS_PATH": "/path/to/browsers"
+      }
+    },
+    "playwright-headed": {
+      "command": "python",
+      "args": [
+        "-m",
+        "playwright_mcp.server",
+        "stdio",
+        "--headed",
+        "--browser",
+        "chromium"
+      ]
+    }
+  }
+}
