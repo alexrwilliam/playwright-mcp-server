@@ -98,23 +98,51 @@ uv run mcp dev src/playwright_mcp/server.py
 
 ### Tools
 
+#### Navigation & Page Control
 - `navigate(url: str)` - Navigate to a URL
 - `reload()` - Reload the current page
 - `go_back()` - Go back in history
 - `go_forward()` - Go forward in history
+- `wait_for_url(url_pattern: str, timeout: int)` - Wait for URL to match pattern
+- `wait_for_load_state(state: str, timeout: int)` - Wait for page load states (domcontentloaded, load, networkidle)
+- `set_viewport_size(width: int, height: int)` - Set viewport dimensions
+
+#### Element Interaction
 - `click(selector: str)` - Click an element
 - `type_text(selector: str, text: str)` - Type text into an element
 - `fill(selector: str, value: str)` - Fill an input field
+- `clear_text(selector: str)` - Clear input field text
 - `select_option(selector: str, value: str)` - Select an option
 - `hover(selector: str)` - Hover over an element
 - `scroll(selector: str, x: int, y: int)` - Scroll element
-- `query_selector(selector: str)` - Query for element
+- `press_key(key: str)` - Press keyboard key
+
+#### Form Handling
+- `check_checkbox(selector: str)` - Check a checkbox
+- `uncheck_checkbox(selector: str)` - Uncheck a checkbox
+- `upload_file(selector: str, file_path: str)` - Upload file to input
+
+#### Element Discovery & Validation
+- `query_selector(selector: str)` - Query for single element
 - `query_selector_all(selector: str)` - Query for all matching elements
+- `is_visible(selector: str)` - Check if element is visible
+- `is_enabled(selector: str)` - Check if element is enabled
+- `wait_for_element(selector: str, timeout: int)` - Wait for element to appear
+- `get_element_bounding_box(selector: str)` - Get element position and size
+- `get_element_attributes(selector: str)` - Get all element attributes
+- `get_computed_style(selector: str, property: str)` - Get CSS computed style
+
+#### Content & Snapshots
 - `get_html()` - Get page HTML
 - `get_accessibility_snapshot()` - Get accessibility tree
-- `screenshot()` - Take screenshot
-- `pdf()` - Generate PDF
-- `evaluate(script: str)` - Run JavaScript
+- `screenshot(selector: str, full_page: bool)` - Take screenshot of page or element
+- `pdf()` - Generate PDF of page
+
+#### JavaScript & Debugging
+- `evaluate(script: str)` - Execute JavaScript in page context
+- `wait_for_network_idle(timeout: int)` - Wait for network activity to settle
+- `get_page_errors()` - Get JavaScript errors from page
+- `get_console_logs()` - Get console output from page
 
 ### Configuration
 
