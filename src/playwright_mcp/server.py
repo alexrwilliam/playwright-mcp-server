@@ -415,6 +415,237 @@ async def evaluate(script: str, ctx: Context) -> ScriptResult:
         return ScriptResult(success=False, error=str(e))
 
 
+# Element State & Validation Tools
+@mcp.tool()
+async def is_visible(selector: str, ctx: Context) -> Dict[str, Any]:
+    """Check if an element is visible."""
+    try:
+        browser_state = get_browser_state(ctx)
+        element = await browser_state.page.query_selector(selector)
+        if element:
+            visible = await element.is_visible()
+            return {"success": True, "selector": selector, "visible": visible}
+        else:
+            return {"success": False, "selector": selector, "error": "Element not found"}
+    except Exception as e:
+        return {"success": False, "selector": selector, "error": str(e)}
+
+
+@mcp.tool()
+async def is_enabled(selector: str, ctx: Context) -> Dict[str, Any]:
+    """Check if an element is enabled."""
+    try:
+        browser_state = get_browser_state(ctx)
+        element = await browser_state.page.query_selector(selector)
+        if element:
+            enabled = await element.is_enabled()
+            return {"success": True, "selector": selector, "enabled": enabled}
+        else:
+            return {"success": False, "selector": selector, "error": "Element not found"}
+    except Exception as e:
+        return {"success": False, "selector": selector, "error": str(e)}
+
+
+@mcp.tool()
+async def wait_for_element(selector: str, ctx: Context, timeout: int = 30000) -> Dict[str, Any]:
+    """Wait for an element to appear."""
+    try:
+        browser_state = get_browser_state(ctx)
+        await browser_state.page.wait_for_selector(selector, timeout=timeout)
+        return {"success": True, "selector": selector, "timeout": timeout}
+    except Exception as e:
+        return {"success": False, "selector": selector, "timeout": timeout, "error": str(e)}
+
+
+@mcp.tool()
+async def wait_for_load_state(state: str, ctx: Context, timeout: int = 30000) -> Dict[str, Any]:
+    """Wait for page load state (domcontentloaded, load, networkidle)."""
+    try:
+        browser_state = get_browser_state(ctx)
+        await browser_state.page.wait_for_load_state(state, timeout=timeout)
+        return {"success": True, "state": state, "timeout": timeout}
+    except Exception as e:
+        return {"success": False, "state": state, "timeout": timeout, "error": str(e)}
+
+
+# Form & Input Handling Tools
+@mcp.tool()
+async def clear_text(selector: str, ctx: Context) -> Dict[str, Any]:
+    """Clear text from an input field."""
+    try:
+        browser_state = get_browser_state(ctx)
+        await browser_state.page.fill(selector, "")
+        return {"success": True, "selector": selector}
+    except Exception as e:
+        return {"success": False, "selector": selector, "error": str(e)}
+
+
+@mcp.tool()
+async def check_checkbox(selector: str, ctx: Context) -> Dict[str, Any]:
+    """Check a checkbox."""
+    try:
+        browser_state = get_browser_state(ctx)
+        await browser_state.page.check(selector)
+        return {"success": True, "selector": selector, "action": "checked"}
+    except Exception as e:
+        return {"success": False, "selector": selector, "error": str(e)}
+
+
+@mcp.tool()
+async def uncheck_checkbox(selector: str, ctx: Context) -> Dict[str, Any]:
+    """Uncheck a checkbox."""
+    try:
+        browser_state = get_browser_state(ctx)
+        await browser_state.page.uncheck(selector)
+        return {"success": True, "selector": selector, "action": "unchecked"}
+    except Exception as e:
+        return {"success": False, "selector": selector, "error": str(e)}
+
+
+@mcp.tool()
+async def upload_file(selector: str, file_path: str, ctx: Context) -> Dict[str, Any]:
+    """Upload a file to a file input."""
+    try:
+        browser_state = get_browser_state(ctx)
+        await browser_state.page.set_input_files(selector, file_path)
+        return {"success": True, "selector": selector, "file_path": file_path}
+    except Exception as e:
+        return {"success": False, "selector": selector, "file_path": file_path, "error": str(e)}
+
+
+@mcp.tool()
+async def press_key(key: str, ctx: Context) -> Dict[str, Any]:
+    """Press a keyboard key."""
+    try:
+        browser_state = get_browser_state(ctx)
+        await browser_state.page.keyboard.press(key)
+        return {"success": True, "key": key}
+    except Exception as e:
+        return {"success": False, "key": key, "error": str(e)}
+
+
+# Advanced Navigation Tools
+@mcp.tool()
+async def wait_for_url(url_pattern: str, ctx: Context, timeout: int = 30000) -> Dict[str, Any]:
+    """Wait for URL to match a pattern."""
+    try:
+        browser_state = get_browser_state(ctx)
+        await browser_state.page.wait_for_url(url_pattern, timeout=timeout)
+        current_url = browser_state.page.url
+        return {"success": True, "url_pattern": url_pattern, "current_url": current_url, "timeout": timeout}
+    except Exception as e:
+        return {"success": False, "url_pattern": url_pattern, "timeout": timeout, "error": str(e)}
+
+
+@mcp.tool()
+async def set_viewport_size(width: int, height: int, ctx: Context) -> Dict[str, Any]:
+    """Set the viewport size."""
+    try:
+        browser_state = get_browser_state(ctx)
+        await browser_state.page.set_viewport_size({"width": width, "height": height})
+        return {"success": True, "width": width, "height": height}
+    except Exception as e:
+        return {"success": False, "width": width, "height": height, "error": str(e)}
+
+
+# Element Discovery & Analysis Tools
+@mcp.tool()
+async def get_element_bounding_box(selector: str, ctx: Context) -> Dict[str, Any]:
+    """Get element position and size."""
+    try:
+        browser_state = get_browser_state(ctx)
+        element = await browser_state.page.query_selector(selector)
+        if element:
+            box = await element.bounding_box()
+            return {"success": True, "selector": selector, "bounding_box": box}
+        else:
+            return {"success": False, "selector": selector, "error": "Element not found"}
+    except Exception as e:
+        return {"success": False, "selector": selector, "error": str(e)}
+
+
+@mcp.tool()
+async def get_element_attributes(selector: str, ctx: Context) -> Dict[str, Any]:
+    """Get all attributes of an element."""
+    try:
+        browser_state = get_browser_state(ctx)
+        element = await browser_state.page.query_selector(selector)
+        if element:
+            attributes = await element.evaluate("el => Object.fromEntries(Array.from(el.attributes).map(attr => [attr.name, attr.value]))")
+            return {"success": True, "selector": selector, "attributes": attributes}
+        else:
+            return {"success": False, "selector": selector, "error": "Element not found"}
+    except Exception as e:
+        return {"success": False, "selector": selector, "error": str(e)}
+
+
+@mcp.tool()
+async def get_computed_style(selector: str, property: str, ctx: Context) -> Dict[str, Any]:
+    """Get computed CSS style property."""
+    try:
+        browser_state = get_browser_state(ctx)
+        element = await browser_state.page.query_selector(selector)
+        if element:
+            style_value = await element.evaluate(f"el => getComputedStyle(el).{property}")
+            return {"success": True, "selector": selector, "property": property, "value": style_value}
+        else:
+            return {"success": False, "selector": selector, "error": "Element not found"}
+    except Exception as e:
+        return {"success": False, "selector": selector, "property": property, "error": str(e)}
+
+
+# Network & Debugging Tools
+@mcp.tool()
+async def wait_for_network_idle(ctx: Context, timeout: int = 30000) -> Dict[str, Any]:
+    """Wait for network to be idle."""
+    try:
+        browser_state = get_browser_state(ctx)
+        await browser_state.page.wait_for_load_state("networkidle", timeout=timeout)
+        return {"success": True, "timeout": timeout}
+    except Exception as e:
+        return {"success": False, "timeout": timeout, "error": str(e)}
+
+
+@mcp.tool()
+async def get_page_errors(ctx: Context) -> Dict[str, Any]:
+    """Get JavaScript errors from the page (requires setup during navigation)."""
+    try:
+        browser_state = get_browser_state(ctx)
+        # Note: This would require setting up error listeners during browser initialization
+        # For now, we'll evaluate to check for any stored errors
+        errors = await browser_state.page.evaluate("""
+            () => {
+                if (window.pageErrors) {
+                    return window.pageErrors;
+                }
+                return [];
+            }
+        """)
+        return {"success": True, "errors": errors}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+async def get_console_logs(ctx: Context) -> Dict[str, Any]:
+    """Get console logs from the page (requires setup during navigation)."""
+    try:
+        browser_state = get_browser_state(ctx)
+        # Note: This would require setting up console listeners during browser initialization
+        # For now, we'll return a message about setup requirements
+        logs = await browser_state.page.evaluate("""
+            () => {
+                if (window.consoleLogs) {
+                    return window.consoleLogs;
+                }
+                return [];
+            }
+        """)
+        return {"success": True, "logs": logs, "note": "Console logging requires browser setup with listeners"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 def main():
     """Main entry point."""
     import argparse
