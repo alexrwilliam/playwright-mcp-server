@@ -420,6 +420,8 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(description="Playwright MCP Server")
+    parser.add_argument("transport", choices=["stdio", "http"], help="Transport type")
+    parser.add_argument("--port", type=int, default=8000, help="Port for HTTP transport")
     parser.add_argument("--headed", action="store_true", help="Run in headed mode")
     parser.add_argument("--browser", choices=["chromium", "firefox", "webkit"], 
                        default="chromium", help="Browser type")
@@ -435,8 +437,15 @@ def main():
     # Setup logging
     logging.basicConfig(level=logging.INFO)
     
-    # Run the server using FastMCP's default behavior
-    mcp.run()
+    # Run the server using FastMCP's run method with transport
+    if args.transport == "stdio":
+        mcp.run()
+    else:
+        # HTTP transport
+        import uvicorn
+        from mcp.server.fastmcp.server import create_app
+        app = create_app(mcp)
+        uvicorn.run(app, host="0.0.0.0", port=args.port)
 
 
 if __name__ == "__main__":

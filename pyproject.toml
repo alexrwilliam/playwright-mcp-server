@@ -26,6 +26,7 @@ dependencies = [
     "playwright>=1.48.0",
     "pydantic>=2.0.0",
     "asyncio-throttle>=1.0.0",
+    "uvicorn>=0.20.0",
 ]
 
 [project.optional-dependencies]
