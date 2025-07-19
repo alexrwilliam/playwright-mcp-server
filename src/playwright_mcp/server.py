@@ -672,10 +672,9 @@ def main():
     if args.transport == "stdio":
         mcp.run()
     else:
-        # HTTP transport
+        # HTTP transport using StreamableHTTP
         import uvicorn
-        from mcp.server.fastmcp.server import create_app
-        app = create_app(mcp)
+        app = mcp.streamable_http_app()
         uvicorn.run(app, host="0.0.0.0", port=args.port)
 
 
