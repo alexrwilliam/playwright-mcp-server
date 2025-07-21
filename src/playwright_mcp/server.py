@@ -155,7 +155,18 @@ def get_browser_state(ctx: Context) -> BrowserState:
 # Navigation Tools
 @mcp.tool()
 async def navigate(url: str, ctx: Context) -> NavigationResult:
-    """Navigate to a URL."""
+    """Navigate the browser to a specified URL.
+    
+    This tool loads a new page in the browser. It supports all standard URL formats
+    including HTTP, HTTPS, file:// URLs, and data URLs.
+    
+    Args:
+        url: The URL to navigate to (e.g., "https://example.com", "file:///path/to/file.html")
+        ctx: MCP context containing the browser state
+    
+    Returns:
+        NavigationResult with success status, final URL (after redirects), and any errors
+    """
     try:
         browser_state = get_browser_state(ctx)
         await browser_state.page.goto(url)
@@ -167,7 +178,17 @@ async def navigate(url: str, ctx: Context) -> NavigationResult:
 
 @mcp.tool()
 async def reload(ctx: Context) -> NavigationResult:
-    """Reload the current page."""
+    """Reload the current page in the browser.
+    
+    This tool refreshes the current page, equivalent to pressing F5 or clicking
+    the browser's reload button. All page state will be reset.
+    
+    Args:
+        ctx: MCP context containing the browser state
+    
+    Returns:
+        NavigationResult with success status, current URL, and any errors
+    """
     try:
         browser_state = get_browser_state(ctx)
         await browser_state.page.reload()
@@ -179,7 +200,17 @@ async def reload(ctx: Context) -> NavigationResult:
 
 @mcp.tool()
 async def go_back(ctx: Context) -> NavigationResult:
-    """Go back in browser history."""
+    """Navigate back to the previous page in browser history.
+    
+    This tool moves back one step in the browser's navigation history,
+    equivalent to clicking the browser's back button.
+    
+    Args:
+        ctx: MCP context containing the browser state
+    
+    Returns:
+        NavigationResult with success status, current URL after navigation, and any errors
+    """
     try:
         browser_state = get_browser_state(ctx)
         await browser_state.page.go_back()
@@ -191,7 +222,18 @@ async def go_back(ctx: Context) -> NavigationResult:
 
 @mcp.tool()
 async def go_forward(ctx: Context) -> NavigationResult:
-    """Go forward in browser history."""
+    """Navigate forward to the next page in browser history.
+    
+    This tool moves forward one step in the browser's navigation history,
+    equivalent to clicking the browser's forward button. Only works if there
+    is a forward history (i.e., you've previously gone back).
+    
+    Args:
+        ctx: MCP context containing the browser state
+    
+    Returns:
+        NavigationResult with success status, current URL after navigation, and any errors
+    """
     try:
         browser_state = get_browser_state(ctx)
         await browser_state.page.go_forward()
@@ -204,7 +246,18 @@ async def go_forward(ctx: Context) -> NavigationResult:
 # DOM Interaction Tools
 @mcp.tool()
 async def click(selector: str, ctx: Context) -> Dict[str, Any]:
-    """Click an element using any Playwright selector."""
+    """Click an element on the page using a Playwright selector.
+    
+    This tool performs a left-click on the first element that matches the selector.
+    Supports CSS selectors, text content, accessibility labels, and other Playwright selectors.
+    
+    Args:
+        selector: Playwright selector to identify the element (e.g., "#button-id", "text=Click me", "[aria-label=Submit]")
+        ctx: MCP context containing the browser state
+    
+    Returns:
+        Dict with success status, selector used, and any error messages
+    """
     try:
         browser_state = get_browser_state(ctx)
         await browser_state.page.click(selector)
@@ -215,7 +268,19 @@ async def click(selector: str, ctx: Context) -> Dict[str, Any]:
 
 @mcp.tool()
 async def type_text(selector: str, text: str, ctx: Context) -> Dict[str, Any]:
-    """Type text into an element."""
+    """Type text into an input element character by character.
+    
+    This tool simulates human typing by sending individual keystrokes to the element.
+    It does not clear existing text - use fill() for that behavior.
+    
+    Args:
+        selector: Playwright selector for the input element (e.g., "input[name=username]", "#search-box")
+        text: Text to type into the element
+        ctx: MCP context containing the browser state
+    
+    Returns:
+        Dict with success status, selector, text typed, and any error messages
+    """
     try:
         browser_state = get_browser_state(ctx)
         await browser_state.page.type(selector, text)
@@ -226,7 +291,19 @@ async def type_text(selector: str, text: str, ctx: Context) -> Dict[str, Any]:
 
 @mcp.tool()
 async def fill(selector: str, value: str, ctx: Context) -> Dict[str, Any]:
-    """Fill an input field."""
+    """Fill an input field with text, replacing any existing content.
+    
+    This tool clears the existing text and sets the new value in one operation.
+    More efficient than type_text for replacing content entirely.
+    
+    Args:
+        selector: Playwright selector for the input element (e.g., "input[type=email]", "textarea")
+        value: Text value to set in the input field
+        ctx: MCP context containing the browser state
+    
+    Returns:
+        Dict with success status, selector, value set, and any error messages
+    """
     try:
         browser_state = get_browser_state(ctx)
         await browser_state.page.fill(selector, value)
@@ -237,7 +314,18 @@ async def fill(selector: str, value: str, ctx: Context) -> Dict[str, Any]:
 
 @mcp.tool()
 async def select_option(selector: str, value: str, ctx: Context) -> Dict[str, Any]:
-    """Select an option from a dropdown."""
+    """Select an option from a dropdown/select element.
+    
+    This tool selects an option by value, label, or index from a <select> element.
+    
+    Args:
+        selector: Playwright selector for the select element (e.g., "select[name=country]", "#dropdown")
+        value: Option to select - can be the value attribute, visible text, or index (e.g., "US", "United States", "0")
+        ctx: MCP context containing the browser state
+    
+    Returns:
+        Dict with success status, selector, selected value, and any error messages
+    """
     try:
         browser_state = get_browser_state(ctx)
         await browser_state.page.select_option(selector, value)
@@ -248,7 +336,18 @@ async def select_option(selector: str, value: str, ctx: Context) -> Dict[str, An
 
 @mcp.tool()
 async def hover(selector: str, ctx: Context) -> Dict[str, Any]:
-    """Hover over an element."""
+    """Move the mouse over an element to trigger hover effects.
+    
+    This tool simulates hovering the mouse cursor over an element, which can
+    reveal tooltips, dropdown menus, or other hover-triggered content.
+    
+    Args:
+        selector: Playwright selector for the element to hover over (e.g., ".menu-item", "[title=Help]")
+        ctx: MCP context containing the browser state
+    
+    Returns:
+        Dict with success status, selector, and any error messages
+    """
     try:
         browser_state = get_browser_state(ctx)
         await browser_state.page.hover(selector)
@@ -259,7 +358,20 @@ async def hover(selector: str, ctx: Context) -> Dict[str, Any]:
 
 @mcp.tool()
 async def scroll(selector: str, ctx: Context, x: int = 0, y: int = 0) -> Dict[str, Any]:
-    """Scroll an element or the page."""
+    """Scroll an element into view or scroll the page by specified amounts.
+    
+    If a selector is provided, scrolls that element into view. If selector is empty,
+    performs a page scroll by the specified x and y pixel amounts.
+    
+    Args:
+        selector: Playwright selector for element to scroll into view, or empty string for page scroll
+        ctx: MCP context containing the browser state
+        x: Horizontal scroll amount in pixels (for page scroll)
+        y: Vertical scroll amount in pixels (for page scroll)
+    
+    Returns:
+        Dict with success status, selector, scroll amounts, and any error messages
+    """
     try:
         browser_state = get_browser_state(ctx)
         if selector:
@@ -279,7 +391,18 @@ async def scroll(selector: str, ctx: Context, x: int = 0, y: int = 0) -> Dict[st
 # Element Discovery Tools
 @mcp.tool()
 async def query_selector(selector: str, ctx: Context) -> ElementQueryResult:
-    """Query for a single element."""
+    """Find and return information about the first element matching a selector.
+    
+    This tool locates a single element on the page and returns detailed information
+    including its tag name, text content, and all attributes.
+    
+    Args:
+        selector: Playwright selector to find the element (e.g., "#main-header", "button:has-text('Submit')", "[data-testid=login]")
+        ctx: MCP context containing the browser state
+    
+    Returns:
+        ElementQueryResult with found status, element details (tag, text, attributes), and any errors
+    """
     try:
         browser_state = get_browser_state(ctx)
         element = await browser_state.page.query_selector(selector)
@@ -308,7 +431,18 @@ async def query_selector(selector: str, ctx: Context) -> ElementQueryResult:
 
 @mcp.tool()
 async def query_selector_all(selector: str, ctx: Context) -> ElementQueryResult:
-    """Query for all matching elements."""
+    """Find and return information about all elements matching a selector.
+    
+    This tool locates all elements on the page that match the selector and returns
+    detailed information for each one including tag names, text content, and attributes.
+    
+    Args:
+        selector: Playwright selector to find elements (e.g., ".nav-item", "input[type=checkbox]", "li")
+        ctx: MCP context containing the browser state
+    
+    Returns:
+        ElementQueryResult with found status, count, array of element details, and any errors
+    """
     try:
         browser_state = get_browser_state(ctx)
         elements = await browser_state.page.query_selector_all(selector)
@@ -337,7 +471,17 @@ async def query_selector_all(selector: str, ctx: Context) -> ElementQueryResult:
 # Snapshotting Tools
 @mcp.tool()
 async def get_html(ctx: Context) -> Dict[str, Any]:
-    """Get the full HTML of the current page."""
+    """Retrieve the complete HTML source of the current page.
+    
+    This tool returns the full HTML content including the DOCTYPE, head, and body
+    sections. Useful for analyzing page structure or saving page content.
+    
+    Args:
+        ctx: MCP context containing the browser state
+    
+    Returns:
+        Dict with success status and the complete HTML source as a string
+    """
     try:
         browser_state = get_browser_state(ctx)
         html = await browser_state.page.content()
@@ -348,7 +492,17 @@ async def get_html(ctx: Context) -> Dict[str, Any]:
 
 @mcp.tool()
 async def get_accessibility_snapshot(ctx: Context) -> Dict[str, Any]:
-    """Get the accessibility tree snapshot."""
+    """Capture the accessibility tree structure of the current page.
+    
+    This tool returns the accessibility tree used by screen readers and other
+    assistive technologies, including roles, names, and hierarchical structure.
+    
+    Args:
+        ctx: MCP context containing the browser state
+    
+    Returns:
+        Dict with success status and the accessibility tree snapshot structure
+    """
     try:
         browser_state = get_browser_state(ctx)
         snapshot = await browser_state.page.accessibility.snapshot()
@@ -363,7 +517,19 @@ async def screenshot(
     selector: Optional[str] = None,
     full_page: bool = False
 ) -> ScreenshotResult:
-    """Take a screenshot of the page or specific element."""
+    """Capture a screenshot of the page or a specific element.
+    
+    This tool generates a PNG image of either the current viewport, the entire page,
+    or a specific element. The image is returned as base64-encoded data.
+    
+    Args:
+        ctx: MCP context containing the browser state
+        selector: Optional Playwright selector for a specific element to screenshot
+        full_page: If True, captures the entire page including content below the fold
+    
+    Returns:
+        ScreenshotResult with success status, base64-encoded PNG data, format, and any errors
+    """
     try:
         browser_state = get_browser_state(ctx)
         
@@ -390,7 +556,17 @@ async def screenshot(
 
 @mcp.tool()
 async def pdf(ctx: Context) -> PDFResult:
-    """Generate a PDF of the current page."""
+    """Generate a PDF document from the current page.
+    
+    This tool converts the current page to a PDF format, useful for saving
+    or printing web content. Only works with Chromium-based browsers.
+    
+    Args:
+        ctx: MCP context containing the browser state
+    
+    Returns:
+        PDFResult with success status, base64-encoded PDF data, and any errors
+    """
     try:
         browser_state = get_browser_state(ctx)
         pdf_bytes = await browser_state.page.pdf()
@@ -406,7 +582,18 @@ async def pdf(ctx: Context) -> PDFResult:
 # Script Evaluation Tool
 @mcp.tool()
 async def evaluate(script: str, ctx: Context) -> ScriptResult:
-    """Execute JavaScript in the page context."""
+    """Execute JavaScript code in the browser page context.
+    
+    This tool runs arbitrary JavaScript code within the page's context,
+    allowing access to DOM, window objects, and page variables.
+    
+    Args:
+        script: JavaScript code to execute (e.g., "document.title", "window.scrollTo(0, 100)")
+        ctx: MCP context containing the browser state
+    
+    Returns:
+        ScriptResult with success status, execution result (if any), and any errors
+    """
     try:
         browser_state = get_browser_state(ctx)
         result = await browser_state.page.evaluate(script)
@@ -418,7 +605,18 @@ async def evaluate(script: str, ctx: Context) -> ScriptResult:
 # Element State & Validation Tools
 @mcp.tool()
 async def is_visible(selector: str, ctx: Context) -> Dict[str, Any]:
-    """Check if an element is visible."""
+    """Check whether an element is visible on the page.
+    
+    This tool determines if an element is currently visible to users, taking into
+    account CSS visibility, display properties, and whether it's within the viewport.
+    
+    Args:
+        selector: Playwright selector for the element to check (e.g., "#modal", ".hidden-element")
+        ctx: MCP context containing the browser state
+    
+    Returns:
+        Dict with success status, selector, visibility boolean, and any errors
+    """
     try:
         browser_state = get_browser_state(ctx)
         element = await browser_state.page.query_selector(selector)
@@ -433,7 +631,18 @@ async def is_visible(selector: str, ctx: Context) -> Dict[str, Any]:
 
 @mcp.tool()
 async def is_enabled(selector: str, ctx: Context) -> Dict[str, Any]:
-    """Check if an element is enabled."""
+    """Check whether an element is enabled and can be interacted with.
+    
+    This tool determines if form elements like buttons, inputs, and selects
+    are enabled (not disabled) and can receive user interactions.
+    
+    Args:
+        selector: Playwright selector for the element to check (e.g., "button[type=submit]", "input[name=email]")
+        ctx: MCP context containing the browser state
+    
+    Returns:
+        Dict with success status, selector, enabled boolean, and any errors
+    """
     try:
         browser_state = get_browser_state(ctx)
         element = await browser_state.page.query_selector(selector)
@@ -448,7 +657,19 @@ async def is_enabled(selector: str, ctx: Context) -> Dict[str, Any]:
 
 @mcp.tool()
 async def wait_for_element(selector: str, ctx: Context, timeout: int = 30000) -> Dict[str, Any]:
-    """Wait for an element to appear."""
+    """Wait for an element to appear in the DOM.
+    
+    This tool waits until an element matching the selector becomes available,
+    useful for handling dynamic content that loads after page initialization.
+    
+    Args:
+        selector: Playwright selector for the element to wait for (e.g., ".loading-complete", "[data-loaded=true]")
+        ctx: MCP context containing the browser state
+        timeout: Maximum wait time in milliseconds (default: 30000)
+    
+    Returns:
+        Dict with success status, selector, timeout value, and any errors
+    """
     try:
         browser_state = get_browser_state(ctx)
         await browser_state.page.wait_for_selector(selector, timeout=timeout)
@@ -459,7 +680,19 @@ async def wait_for_element(selector: str, ctx: Context, timeout: int = 30000) ->
 
 @mcp.tool()
 async def wait_for_load_state(state: str, ctx: Context, timeout: int = 30000) -> Dict[str, Any]:
-    """Wait for page load state (domcontentloaded, load, networkidle)."""
+    """Wait for the page to reach a specific loading state.
+    
+    This tool waits for different stages of page loading to complete, ensuring
+    content is ready before proceeding with interactions.
+    
+    Args:
+        state: Loading state to wait for - "domcontentloaded" (DOM ready), "load" (all resources), or "networkidle" (no requests for 500ms)
+        ctx: MCP context containing the browser state
+        timeout: Maximum wait time in milliseconds (default: 30000)
+    
+    Returns:
+        Dict with success status, target state, timeout value, and any errors
+    """
     try:
         browser_state = get_browser_state(ctx)
         await browser_state.page.wait_for_load_state(state, timeout=timeout)
@@ -471,7 +704,18 @@ async def wait_for_load_state(state: str, ctx: Context, timeout: int = 30000) ->
 # Form & Input Handling Tools
 @mcp.tool()
 async def clear_text(selector: str, ctx: Context) -> Dict[str, Any]:
-    """Clear text from an input field."""
+    """Clear all text content from an input field.
+    
+    This tool removes all existing text from text inputs, textareas, and other
+    editable fields, leaving them empty.
+    
+    Args:
+        selector: Playwright selector for the input element (e.g., "input[name=message]", "#comment-box")
+        ctx: MCP context containing the browser state
+    
+    Returns:
+        Dict with success status, selector, and any errors
+    """
     try:
         browser_state = get_browser_state(ctx)
         await browser_state.page.fill(selector, "")
@@ -482,7 +726,18 @@ async def clear_text(selector: str, ctx: Context) -> Dict[str, Any]:
 
 @mcp.tool()
 async def check_checkbox(selector: str, ctx: Context) -> Dict[str, Any]:
-    """Check a checkbox."""
+    """Check a checkbox or radio button element.
+    
+    This tool selects a checkbox or radio button, setting it to the checked state.
+    If already checked, the operation has no effect.
+    
+    Args:
+        selector: Playwright selector for the checkbox/radio element (e.g., "input[type=checkbox][name=agree]", "#newsletter")
+        ctx: MCP context containing the browser state
+    
+    Returns:
+        Dict with success status, selector, action performed, and any errors
+    """
     try:
         browser_state = get_browser_state(ctx)
         await browser_state.page.check(selector)
@@ -493,7 +748,18 @@ async def check_checkbox(selector: str, ctx: Context) -> Dict[str, Any]:
 
 @mcp.tool()
 async def uncheck_checkbox(selector: str, ctx: Context) -> Dict[str, Any]:
-    """Uncheck a checkbox."""
+    """Uncheck a checkbox element.
+    
+    This tool deselects a checkbox, setting it to the unchecked state.
+    If already unchecked, the operation has no effect.
+    
+    Args:
+        selector: Playwright selector for the checkbox element (e.g., "input[type=checkbox][name=notifications]", ".privacy-checkbox")
+        ctx: MCP context containing the browser state
+    
+    Returns:
+        Dict with success status, selector, action performed, and any errors
+    """
     try:
         browser_state = get_browser_state(ctx)
         await browser_state.page.uncheck(selector)
@@ -504,7 +770,19 @@ async def uncheck_checkbox(selector: str, ctx: Context) -> Dict[str, Any]:
 
 @mcp.tool()
 async def upload_file(selector: str, file_path: str, ctx: Context) -> Dict[str, Any]:
-    """Upload a file to a file input."""
+    """Upload a file through a file input element.
+    
+    This tool selects and uploads a file from the local filesystem to a
+    file input element on the page.
+    
+    Args:
+        selector: Playwright selector for the file input element (e.g., "input[type=file]", "#avatar-upload")
+        file_path: Absolute path to the file to upload (e.g., "/path/to/document.pdf")
+        ctx: MCP context containing the browser state
+    
+    Returns:
+        Dict with success status, selector, file path, and any errors
+    """
     try:
         browser_state = get_browser_state(ctx)
         await browser_state.page.set_input_files(selector, file_path)
@@ -515,7 +793,18 @@ async def upload_file(selector: str, file_path: str, ctx: Context) -> Dict[str, 
 
 @mcp.tool()
 async def press_key(key: str, ctx: Context) -> Dict[str, Any]:
-    """Press a keyboard key."""
+    """Simulate pressing a keyboard key.
+    
+    This tool sends a key press event to the page, useful for shortcuts,
+    navigation keys, or special key combinations.
+    
+    Args:
+        key: Key to press (e.g., "Enter", "Escape", "Tab", "Control+s", "ArrowDown")
+        ctx: MCP context containing the browser state
+    
+    Returns:
+        Dict with success status, key pressed, and any errors
+    """
     try:
         browser_state = get_browser_state(ctx)
         await browser_state.page.keyboard.press(key)
@@ -527,7 +816,19 @@ async def press_key(key: str, ctx: Context) -> Dict[str, Any]:
 # Advanced Navigation Tools
 @mcp.tool()
 async def wait_for_url(url_pattern: str, ctx: Context, timeout: int = 30000) -> Dict[str, Any]:
-    """Wait for URL to match a pattern."""
+    """Wait for the browser URL to match a specific pattern.
+    
+    This tool waits until the current page URL matches the provided pattern,
+    useful for handling redirects or navigation completion.
+    
+    Args:
+        url_pattern: URL pattern to match - can be exact URL, glob pattern, or regex (e.g., "**/dashboard", "https://example.com/success")
+        ctx: MCP context containing the browser state
+        timeout: Maximum wait time in milliseconds (default: 30000)
+    
+    Returns:
+        Dict with success status, URL pattern, current URL, timeout, and any errors
+    """
     try:
         browser_state = get_browser_state(ctx)
         await browser_state.page.wait_for_url(url_pattern, timeout=timeout)
@@ -539,7 +840,19 @@ async def wait_for_url(url_pattern: str, ctx: Context, timeout: int = 30000) -> 
 
 @mcp.tool()
 async def set_viewport_size(width: int, height: int, ctx: Context) -> Dict[str, Any]:
-    """Set the viewport size."""
+    """Change the browser viewport dimensions.
+    
+    This tool resizes the browser's viewport to simulate different screen sizes,
+    useful for testing responsive designs or mobile layouts.
+    
+    Args:
+        width: Viewport width in pixels (e.g., 1920, 768, 375)
+        height: Viewport height in pixels (e.g., 1080, 1024, 667)
+        ctx: MCP context containing the browser state
+    
+    Returns:
+        Dict with success status, new dimensions, and any errors
+    """
     try:
         browser_state = get_browser_state(ctx)
         await browser_state.page.set_viewport_size({"width": width, "height": height})
@@ -551,7 +864,18 @@ async def set_viewport_size(width: int, height: int, ctx: Context) -> Dict[str, 
 # Element Discovery & Analysis Tools
 @mcp.tool()
 async def get_element_bounding_box(selector: str, ctx: Context) -> Dict[str, Any]:
-    """Get element position and size."""
+    """Get the position and dimensions of an element.
+    
+    This tool returns the bounding box coordinates and size of an element,
+    useful for layout analysis or positioning calculations.
+    
+    Args:
+        selector: Playwright selector for the element (e.g., "#main-content", ".sidebar")
+        ctx: MCP context containing the browser state
+    
+    Returns:
+        Dict with success status, selector, bounding box (x, y, width, height), and any errors
+    """
     try:
         browser_state = get_browser_state(ctx)
         element = await browser_state.page.query_selector(selector)
@@ -566,7 +890,18 @@ async def get_element_bounding_box(selector: str, ctx: Context) -> Dict[str, Any
 
 @mcp.tool()
 async def get_element_attributes(selector: str, ctx: Context) -> Dict[str, Any]:
-    """Get all attributes of an element."""
+    """Retrieve all HTML attributes of an element.
+    
+    This tool returns a dictionary of all attributes and their values for
+    the specified element, useful for inspecting element properties.
+    
+    Args:
+        selector: Playwright selector for the element (e.g., "img[alt]", "a.external-link")
+        ctx: MCP context containing the browser state
+    
+    Returns:
+        Dict with success status, selector, attributes dictionary, and any errors
+    """
     try:
         browser_state = get_browser_state(ctx)
         element = await browser_state.page.query_selector(selector)
@@ -581,7 +916,19 @@ async def get_element_attributes(selector: str, ctx: Context) -> Dict[str, Any]:
 
 @mcp.tool()
 async def get_computed_style(selector: str, property: str, ctx: Context) -> Dict[str, Any]:
-    """Get computed CSS style property."""
+    """Get the computed CSS value for a specific style property of an element.
+    
+    This tool retrieves the final computed CSS value after all stylesheets
+    and inheritance rules have been applied.
+    
+    Args:
+        selector: Playwright selector for the element (e.g., ".header", "#main-nav")
+        property: CSS property name (e.g., "color", "fontSize", "display", "margin-top")
+        ctx: MCP context containing the browser state
+    
+    Returns:
+        Dict with success status, selector, property name, computed value, and any errors
+    """
     try:
         browser_state = get_browser_state(ctx)
         element = await browser_state.page.query_selector(selector)
@@ -597,7 +944,18 @@ async def get_computed_style(selector: str, property: str, ctx: Context) -> Dict
 # Network & Debugging Tools
 @mcp.tool()
 async def wait_for_network_idle(ctx: Context, timeout: int = 30000) -> Dict[str, Any]:
-    """Wait for network to be idle."""
+    """Wait for network activity to become idle.
+    
+    This tool waits until there are no network requests for at least 500ms,
+    indicating that dynamic content loading has completed.
+    
+    Args:
+        ctx: MCP context containing the browser state
+        timeout: Maximum wait time in milliseconds (default: 30000)
+    
+    Returns:
+        Dict with success status, timeout value, and any errors
+    """
     try:
         browser_state = get_browser_state(ctx)
         await browser_state.page.wait_for_load_state("networkidle", timeout=timeout)
@@ -608,7 +966,17 @@ async def wait_for_network_idle(ctx: Context, timeout: int = 30000) -> Dict[str,
 
 @mcp.tool()
 async def get_page_errors(ctx: Context) -> Dict[str, Any]:
-    """Get JavaScript errors from the page (requires setup during navigation)."""
+    """Retrieve JavaScript errors that occurred on the page.
+    
+    This tool returns any JavaScript errors that have been captured during
+    page execution. Note: Error collection requires browser setup with listeners.
+    
+    Args:
+        ctx: MCP context containing the browser state
+    
+    Returns:
+        Dict with success status, array of error messages, and any errors
+    """
     try:
         browser_state = get_browser_state(ctx)
         # Note: This would require setting up error listeners during browser initialization
@@ -628,7 +996,17 @@ async def get_page_errors(ctx: Context) -> Dict[str, Any]:
 
 @mcp.tool()
 async def get_console_logs(ctx: Context) -> Dict[str, Any]:
-    """Get console logs from the page (requires setup during navigation)."""
+    """Retrieve console log messages from the page.
+    
+    This tool returns console.log, console.error, and other console messages
+    that occurred during page execution. Note: Log collection requires browser setup.
+    
+    Args:
+        ctx: MCP context containing the browser state
+    
+    Returns:
+        Dict with success status, array of console messages, setup note, and any errors
+    """
     try:
         browser_state = get_browser_state(ctx)
         # Note: This would require setting up console listeners during browser initialization
