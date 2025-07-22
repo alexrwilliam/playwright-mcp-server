@@ -10,6 +10,11 @@ A minimal, robust Playwright MCP (Model Context Protocol) server that exposes co
 - **Element Discovery**: Query elements using CSS, XPath, role, text, and other Playwright locators
 - **Snapshotting**: Get HTML, accessibility snapshots, screenshots, and PDFs
 - **Script Evaluation**: Run JavaScript in the page context
+- **Network Monitoring**: Capture and analyze all network requests and responses
+- **Network Interception**: Block, modify, or mock network requests
+- **Cookie Management**: Get, set, and clear browser cookies
+- **Storage Access**: Manage localStorage and sessionStorage data
+- **Headers & User Agent**: Customize request headers and browser identity
 - **Raw Output**: All outputs are raw Playwright results with no post-processing
 
 ## Installation
@@ -143,6 +148,31 @@ uv run mcp dev src/playwright_mcp/server.py
 - `wait_for_network_idle(timeout: int)` - Wait for network activity to settle
 - `get_page_errors()` - Get JavaScript errors from page
 - `get_console_logs()` - Get console output from page
+
+#### Network Monitoring & Interception
+- `get_network_requests(url_pattern: str)` - Retrieve captured network requests with filtering
+- `get_network_responses(url_pattern: str)` - Retrieve captured network responses with filtering
+- `clear_network_logs()` - Clear all captured network request/response logs
+- `intercept_route(url_pattern: str, action: str, ...)` - Intercept and handle network requests
+- `unroute_all()` - Remove all route interceptors
+- `wait_for_response(url_pattern: str, timeout: int)` - Wait for specific network responses
+- `get_response_body(url_pattern: str)` - Extract response body content from network calls
+
+#### Cookie Management
+- `get_cookies(urls: List[str])` - Retrieve browser cookies with optional URL filtering
+- `add_cookies(cookies: List[Dict])` - Add cookies to browser context
+- `clear_cookies(name: str, domain: str)` - Clear cookies with optional filtering
+
+#### Storage Management
+- `get_local_storage(origin: str)` - Access localStorage data
+- `set_local_storage(key: str, value: str)` - Set localStorage items
+- `get_session_storage()` - Access sessionStorage data
+- `set_session_storage(key: str, value: str)` - Set sessionStorage items
+- `clear_storage(storage_type: str)` - Clear localStorage and/or sessionStorage
+
+#### Request Headers & Identity
+- `set_extra_headers(headers: Dict)` - Add custom HTTP headers to all requests
+- `set_user_agent(user_agent: str)` - Change browser User-Agent string
 
 ### Configuration
 
