@@ -137,12 +137,16 @@ class Config:
         timeout: int = 30000,
         viewport_width: int = 1920,
         viewport_height: int = 1080,
+        channel: Optional[str] = None,
+        user_data_dir: Optional[str] = None,
     ):
         self.headless = headless
         self.browser_type = browser_type
         self.timeout = timeout
         self.viewport_width = viewport_width
         self.viewport_height = viewport_height
+        self.channel = channel
+        self.user_data_dir = user_data_dir
 
 
 # Global configuration
@@ -157,23 +161,69 @@ async def browser_lifespan(server: FastMCP) -> AsyncIterator[BrowserState]:
     playwright = await async_playwright().start()
 
     try:
-        # Launch browser
-        if config.browser_type == "chromium":
-            browser = await playwright.chromium.launch(headless=config.headless)
-        elif config.browser_type == "firefox":
-            browser = await playwright.firefox.launch(headless=config.headless)
-        elif config.browser_type == "webkit":
-            browser = await playwright.webkit.launch(headless=config.headless)
+        # Determine if we should use persistent context
+        use_persistent_context = config.user_data_dir is not None
+
+        if use_persistent_context:
+            # Use persistent context (no separate browser object)
+            launch_options = {
+                "headless": config.headless,
+                "viewport": {
+                    "width": config.viewport_width,
+                    "height": config.viewport_height,
+                },
+            }
+
+            if config.channel:
+                launch_options["channel"] = config.channel
+
+            if config.browser_type == "chromium":
+                context = await playwright.chromium.launch_persistent_context(
+                    config.user_data_dir, **launch_options
+                )
+            elif config.browser_type == "firefox":
+                context = await playwright.firefox.launch_persistent_context(
+                    config.user_data_dir, **launch_options
+                )
+            elif config.browser_type == "webkit":
+                context = await playwright.webkit.launch_persistent_context(
+                    config.user_data_dir, **launch_options
+                )
+            else:
+                raise ValueError(f"Unsupported browser type: {config.browser_type}")
+
+            # For persistent context, the browser is accessed via context.browser
+            browser = context.browser
+            # Get existing page or create new one
+            if context.pages:
+                page = context.pages[0]
+            else:
+                page = await context.new_page()
         else:
-            raise ValueError(f"Unsupported browser type: {config.browser_type}")
+            # Regular browser launch
+            launch_options = {"headless": config.headless}
+            if config.channel:
+                launch_options["channel"] = config.channel
 
-        # Create context
-        context = await browser.new_context(
-            viewport={"width": config.viewport_width, "height": config.viewport_height}
-        )
+            if config.browser_type == "chromium":
+                browser = await playwright.chromium.launch(**launch_options)
+            elif config.browser_type == "firefox":
+                browser = await playwright.firefox.launch(**launch_options)
+            elif config.browser_type == "webkit":
+                browser = await playwright.webkit.launch(**launch_options)
+            else:
+                raise ValueError(f"Unsupported browser type: {config.browser_type}")
 
-        # Create page
-        page = await context.new_page()
+            # Create context
+            context = await browser.new_context(
+                viewport={
+                    "width": config.viewport_width,
+                    "height": config.viewport_height,
+                }
+            )
+
+            # Create page
+            page = await context.new_page()
 
         # Set default timeout
         page.set_default_timeout(config.timeout)
@@ -191,7 +241,12 @@ async def browser_lifespan(server: FastMCP) -> AsyncIterator[BrowserState]:
     finally:
         logger.info("Shutting down browser...")
         try:
-            await browser.close()
+            if use_persistent_context:
+                # For persistent context, close the context (which closes the browser)
+                await context.close()
+            else:
+                # For regular browser, close the browser
+                await browser.close()
         except Exception as e:
             logger.error(f"Error closing browser: {e}")
 
@@ -1760,6 +1815,25 @@ def main():
     parser.add_argument(
         "--timeout", type=int, default=30000, help="Default timeout (ms)"
     )
+    parser.add_argument(
+        "--channel",
+        choices=[
+            "chrome",
+            "chrome-beta",
+            "chrome-dev",
+            "chrome-canary",
+            "msedge",
+            "msedge-beta",
+            "msedge-dev",
+            "msedge-canary",
+        ],
+        help="Browser channel (use real Chrome/Edge instead of bundled Chromium)",
+    )
+    parser.add_argument(
+        "--user-data-dir",
+        type=str,
+        help="Path to Chrome user data directory (enables persistent context with your profile)",
+    )
 
     args = parser.parse_args()
 
@@ -1767,6 +1841,8 @@ def main():
     config.headless = not args.headed
     config.browser_type = args.browser
     config.timeout = args.timeout
+    config.channel = args.channel
+    config.user_data_dir = getattr(args, "user_data_dir", None)
 
     # Setup logging
     logging.basicConfig(level=logging.INFO)

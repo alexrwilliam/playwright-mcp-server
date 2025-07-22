@@ -75,6 +75,16 @@ playwright-mcp http --port 8000
 # Use different browsers
 playwright-mcp stdio --browser firefox
 playwright-mcp stdio --browser webkit
+
+# Use real Chrome instead of bundled Chromium
+playwright-mcp stdio --channel chrome
+
+# Use real Chrome with your profile (cookies, extensions, history)
+playwright-mcp stdio --channel chrome --user-data-dir "/Users/you/Library/Application Support/Google/Chrome"
+
+# Other Chrome channels
+playwright-mcp stdio --channel chrome-beta
+playwright-mcp stdio --channel chrome-dev
 ```
 
 ### Integration with Claude Desktop
@@ -179,9 +189,36 @@ uv run mcp dev src/playwright_mcp/server.py
 The server accepts the following configuration options:
 
 - `--headed` / `--headless` - Run browser in headed or headless mode
-- `--browser` - Browser type (chromium, firefox, webkit)
+- `--browser` - Browser type (chromium, firefox, webkit)  
+- `--channel` - Browser channel (chrome, chrome-beta, msedge, etc.) for real browsers
+- `--user-data-dir` - Path to browser profile directory for persistent context
 - `--port` - Port for HTTP transport
 - `--timeout` - Default timeout for operations (ms)
+
+### Real Chrome vs Bundled Chromium
+
+By default, Playwright uses bundled Chromium. For web scraping that requires real Chrome features:
+
+**Use `--channel chrome`** to use your installed Google Chrome:
+- Access to all Chrome features and codecs
+- Better compatibility with some websites
+- Chrome-specific behaviors
+
+**Use `--user-data-dir`** to access your real profile:
+- All your cookies and login sessions
+- Browser extensions (AdBlock, etc.)
+- Browsing history and autofill data
+- Bookmarks and saved passwords
+
+**Example for macOS:**
+```bash
+playwright-mcp stdio --channel chrome --user-data-dir "/Users/$(whoami)/Library/Application Support/Google/Chrome"
+```
+
+**Example for Linux:**
+```bash  
+playwright-mcp stdio --channel chrome --user-data-dir "/home/$(whoami)/.config/google-chrome"
+```
 
 ## Development
 
