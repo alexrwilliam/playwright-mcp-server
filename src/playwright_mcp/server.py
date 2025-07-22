@@ -160,9 +160,12 @@ async def browser_lifespan(server: FastMCP) -> AsyncIterator[BrowserState]:
 
     playwright = await async_playwright().start()
 
+    # Initialize variables for cleanup
+    use_persistent_context = config.user_data_dir is not None
+    browser = None
+    context = None
+
     try:
-        # Determine if we should use persistent context
-        use_persistent_context = config.user_data_dir is not None
 
         if use_persistent_context:
             # Use persistent context (no separate browser object)
@@ -241,10 +244,10 @@ async def browser_lifespan(server: FastMCP) -> AsyncIterator[BrowserState]:
     finally:
         logger.info("Shutting down browser...")
         try:
-            if use_persistent_context:
+            if use_persistent_context and context:
                 # For persistent context, close the context (which closes the browser)
                 await context.close()
-            else:
+            elif browser:
                 # For regular browser, close the browser
                 await browser.close()
         except Exception as e:
