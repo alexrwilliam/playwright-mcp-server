@@ -118,6 +118,7 @@ uv run mcp dev src/playwright_mcp/server.py
 - `reload()` - Reload the current page
 - `go_back()` - Go back in history
 - `go_forward()` - Go forward in history
+- `get_current_url()` - Get current page URL with parsed components and query parameters
 - `wait_for_url(url_pattern: str, timeout: int)` - Wait for URL to match pattern
 - `wait_for_load_state(state: str, timeout: int)` - Wait for page load states (domcontentloaded, load, networkidle)
 - `set_viewport_size(width: int, height: int)` - Set viewport dimensions

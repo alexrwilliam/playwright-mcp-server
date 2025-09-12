@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Union
+from urllib.parse import urlparse, parse_qs
 
 from mcp.server.fastmcp import Context, FastMCP
 from playwright.async_api import (
@@ -52,6 +53,16 @@ class NavigationResult(BaseModel):
 
     success: bool
     url: str
+    error: Optional[str] = None
+
+
+class CurrentUrlResult(BaseModel):
+    """Current URL information result."""
+
+    success: bool
+    url: Optional[str] = None
+    parsed_url: Optional[Dict[str, Any]] = None
+    query_params: Optional[Dict[str, List[str]]] = None
     error: Optional[str] = None
 
 
@@ -395,6 +406,48 @@ async def go_forward(ctx: Context) -> NavigationResult:
         return NavigationResult(success=True, url=current_url)
     except Exception as e:
         return NavigationResult(success=False, url="", error=str(e))
+
+
+@mcp.tool()
+async def get_current_url(ctx: Context) -> CurrentUrlResult:
+    """Get the current page URL with parsed components and query parameters.
+
+    This tool retrieves the current page URL and provides parsed information
+    including the scheme, domain, path, and query parameters for easy access.
+
+    Args:
+        ctx: MCP context containing the browser state
+
+    Returns:
+        CurrentUrlResult with success status, URL, parsed components, query parameters, and any errors
+    """
+    try:
+        browser_state = get_browser_state(ctx)
+        current_url = browser_state.page.url
+        
+        # Parse the URL into components
+        parsed = urlparse(current_url)
+        parsed_url = {
+            "scheme": parsed.scheme,
+            "netloc": parsed.netloc,
+            "hostname": parsed.hostname,
+            "port": parsed.port,
+            "path": parsed.path,
+            "fragment": parsed.fragment,
+            "query": parsed.query
+        }
+        
+        # Parse query parameters
+        query_params = parse_qs(parsed.query, keep_blank_values=True)
+        
+        return CurrentUrlResult(
+            success=True,
+            url=current_url,
+            parsed_url=parsed_url,
+            query_params=query_params
+        )
+    except Exception as e:
+        return CurrentUrlResult(success=False, error=str(e))
 
 
 # DOM Interaction Tools

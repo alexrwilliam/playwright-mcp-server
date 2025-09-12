@@ -29,6 +29,25 @@ async def demo_browser_automation():
             }
         },
         {
+            "tool": "get_current_url",
+            "description": "Get current page URL with parsed components",
+            "params": {},
+            "expected_result": {
+                "success": True,
+                "url": "https://example.com",
+                "parsed_url": {
+                    "scheme": "https",
+                    "netloc": "example.com",
+                    "hostname": "example.com",
+                    "port": None,
+                    "path": "/",
+                    "fragment": "",
+                    "query": ""
+                },
+                "query_params": {}
+            }
+        },
+        {
             "tool": "query_selector",
             "description": "Find an element on the page",
             "params": {"selector": "h1"},
@@ -158,13 +177,14 @@ async def demo_browser_automation():
         print(f"   Expected Result: {json.dumps(example['expected_result'], indent=6)}")
         print()
     
-    print("=== Available Tools (33 total) ===")
+    print("=== Available Tools (34 total) ===")
     tool_categories = {
         "Navigation & Page Control": [
             "navigate(url: str) - Navigate to a URL",
             "reload() - Reload the current page", 
             "go_back() - Go back in history",
             "go_forward() - Go forward in history",
+            "get_current_url() - Get current URL with parsed components and query parameters",
             "wait_for_url(url_pattern: str, timeout: int) - Wait for URL to match pattern",
             "wait_for_load_state(state: str, timeout: int) - Wait for page load states",
             "set_viewport_size(width: int, height: int) - Set viewport dimensions"
