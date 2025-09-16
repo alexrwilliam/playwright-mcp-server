@@ -5,6 +5,7 @@ A minimal, robust Playwright MCP (Model Context Protocol) server that exposes co
 ## Features
 
 - **Browser Context Management**: Persistent browser context (headless or headed, configurable)
+- **Multi-Page Support**: Handle multiple tabs/windows, switch between pages, manage popups
 - **Navigation**: Open URLs, reload, go back/forward
 - **DOM Interaction**: Click, type, fill, select, hover, scroll using Playwright selectors
 - **Element Discovery**: Query elements using CSS, XPath, role, text, and other Playwright locators
@@ -123,6 +124,13 @@ uv run mcp dev src/playwright_mcp/server.py
 - `wait_for_load_state(state: str, timeout: int)` - Wait for page load states (domcontentloaded, load, networkidle)
 - `set_viewport_size(width: int, height: int)` - Set viewport dimensions
 
+#### Multi-Page Management (Tabs/Windows)
+- `list_pages()` - List all open browser pages/tabs with IDs, URLs, and titles
+- `switch_page(page_id: str)` - Switch to a different page/tab by its ID
+- `close_page(page_id: str)` - Close a specific page/tab (cannot close last one)
+- `wait_for_popup(timeout: int)` - Wait for and capture a new popup/tab
+- `switch_to_latest_page()` - Switch to the most recently opened page
+
 #### Element Interaction
 - `click(selector: str)` - Click an element
 - `type_text(selector: str, text: str)` - Type text into an element
@@ -185,12 +193,36 @@ uv run mcp dev src/playwright_mcp/server.py
 - `set_extra_headers(headers: Dict)` - Add custom HTTP headers to all requests
 - `set_user_agent(user_agent: str)` - Change browser User-Agent string
 
+## Examples
+
+### Handling Multiple Pages/Tabs
+
+The server automatically tracks all browser pages/tabs:
+
+```python
+# Example: Clicking a link that opens in a new tab
+1. navigate("https://example.com")
+2. click("a[target='_blank']")  # Opens new tab
+3. list_pages()  # Shows all open tabs with IDs
+4. switch_to_latest_page()  # Switch to the new tab
+5. get_current_url()  # Get URL of new tab
+6. switch_page(original_page_id)  # Switch back
+
+# Example: Handling JavaScript popups
+1. evaluate("window.open('https://example.com', '_blank')")
+2. wait_for_popup(timeout=5000)  # Wait for and capture popup
+3. list_pages()  # See all pages including popup
+4. close_page(popup_id)  # Close the popup
+```
+
+All existing tools automatically work on the currently active page. When you switch pages, subsequent operations apply to the new active page.
+
 ### Configuration
 
 The server accepts the following configuration options:
 
 - `--headed` / `--headless` - Run browser in headed or headless mode
-- `--browser` - Browser type (chromium, firefox, webkit)  
+- `--browser` - Browser type (chromium, firefox, webkit)
 - `--channel` - Browser channel (chrome, chrome-beta, msedge, etc.) for real browsers
 - `--user-data-dir` - Path to browser profile directory for persistent context
 - `--port` - Port for HTTP transport

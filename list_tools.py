@@ -16,6 +16,11 @@ def list_tools():
         ("go_back", "Go back in browser history"),
         ("go_forward", "Go forward in browser history"),
         ("get_current_url", "Get current page URL with parsed components and query parameters"),
+        ("list_pages", "List all open browser pages/tabs"),
+        ("switch_page", "Switch to a different page/tab by ID"),
+        ("close_page", "Close a specific page/tab"),
+        ("wait_for_popup", "Wait for and capture new popup/tab"),
+        ("switch_to_latest_page", "Switch to most recently opened page"),
         ("click", "Click an element using any Playwright selector"),
         ("type_text", "Type text into an element"),
         ("fill", "Fill an input field"),
@@ -69,6 +74,7 @@ def list_tools():
     
     categories = {
         "Navigation & URL": ["navigate", "reload", "go_back", "go_forward", "get_current_url", "wait_for_url"],
+        "Multi-Page Management": ["list_pages", "switch_page", "close_page", "wait_for_popup", "switch_to_latest_page"],
         "DOM Interaction": ["click", "type_text", "fill", "select_option", "hover", "scroll", "press_key"],
         "Form Handling": ["clear_text", "check_checkbox", "uncheck_checkbox", "upload_file"],
         "Element Discovery": ["query_selector", "query_selector_all", "is_visible", "is_enabled", "wait_for_element"],

@@ -35,17 +35,35 @@ class BrowserState:
     playwright: Playwright
     browser: Browser
     context: BrowserContext
-    page: Page
+    page: Page  # Current active page
+
+    # Page management
+    pages: Dict[str, Page] = None  # Maps page ID to Page object
+    current_page_id: str = None  # ID of the current active page
 
     # Network monitoring state
     captured_requests: List[Dict[str, Any]] = None
     captured_responses: List[Dict[str, Any]] = None
 
     def __post_init__(self):
+        if self.pages is None:
+            self.pages = {}
         if self.captured_requests is None:
             self.captured_requests = []
         if self.captured_responses is None:
             self.captured_responses = []
+
+    def get_current_page(self) -> Page:
+        """Get the current active page."""
+        if self.current_page_id and self.current_page_id in self.pages:
+            return self.pages[self.current_page_id]
+        return self.page
+
+    def set_current_page(self, page_id: str):
+        """Set the current active page by ID."""
+        if page_id in self.pages:
+            self.current_page_id = page_id
+            self.page = self.pages[page_id]
 
 
 class NavigationResult(BaseModel):
@@ -135,6 +153,43 @@ class StorageResult(BaseModel):
 
     success: bool
     data: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+
+
+class PageInfo(BaseModel):
+    """Information about a browser page/tab."""
+
+    page_id: str
+    url: str
+    title: str
+    is_current: bool
+
+
+class PageListResult(BaseModel):
+    """Result of listing all open pages."""
+
+    success: bool
+    pages: List[PageInfo] = Field(default_factory=list)
+    current_page_id: Optional[str] = None
+    error: Optional[str] = None
+
+
+class PageSwitchResult(BaseModel):
+    """Result of switching between pages."""
+
+    success: bool
+    page_id: Optional[str] = None
+    url: Optional[str] = None
+    error: Optional[str] = None
+
+
+class NewPageResult(BaseModel):
+    """Result of waiting for a new page to open."""
+
+    success: bool
+    page_id: Optional[str] = None
+    url: Optional[str] = None
+    opener_page_id: Optional[str] = None
     error: Optional[str] = None
 
 
@@ -246,6 +301,15 @@ async def browser_lifespan(server: FastMCP) -> AsyncIterator[BrowserState]:
             playwright=playwright, browser=browser, context=context, page=page
         )
 
+        # Initialize page tracking with the first page
+        import uuid
+        page_id = str(uuid.uuid4())
+        state.pages[page_id] = page
+        state.current_page_id = page_id
+
+        # Set up page tracking for new pages/tabs
+        await _setup_page_tracking(state)
+
         # Set up network monitoring
         await _setup_network_monitoring(state)
 
@@ -274,8 +338,35 @@ async def browser_lifespan(server: FastMCP) -> AsyncIterator[BrowserState]:
 mcp = FastMCP("Playwright MCP Server", lifespan=browser_lifespan)
 
 
-async def _setup_network_monitoring(state: BrowserState):
-    """Set up network request and response monitoring."""
+async def _setup_page_tracking(state: BrowserState):
+    """Set up page tracking for new tabs and popups."""
+    import uuid
+
+    async def handle_new_page(page: Page):
+        """Handle new page/tab creation."""
+        try:
+            # Generate unique ID for the new page
+            page_id = str(uuid.uuid4())
+
+            # Set default timeout for new page
+            page.set_default_timeout(config.timeout)
+
+            # Add to pages dictionary
+            state.pages[page_id] = page
+
+            # Set up network monitoring for the new page
+            await _setup_network_monitoring_for_page(state, page)
+
+            logger.info(f"New page opened with ID: {page_id}, URL: {page.url}")
+        except Exception as e:
+            logger.error(f"Error handling new page: {e}")
+
+    # Listen for new pages (tabs, popups, etc.)
+    state.context.on("page", handle_new_page)
+
+
+async def _setup_network_monitoring_for_page(state: BrowserState, page: Page):
+    """Set up network monitoring for a specific page."""
     import time
 
     async def handle_request(request: Request):
@@ -307,14 +398,25 @@ async def _setup_network_monitoring(state: BrowserState):
         except Exception as e:
             logger.error(f"Error capturing response: {e}")
 
-    # Set up event listeners
-    state.page.on("request", handle_request)
-    state.page.on("response", handle_response)
+    # Set up event listeners for this page
+    page.on("request", handle_request)
+    page.on("response", handle_response)
+
+
+async def _setup_network_monitoring(state: BrowserState):
+    """Set up network request and response monitoring for initial page."""
+    await _setup_network_monitoring_for_page(state, state.page)
 
 
 def get_browser_state(ctx: Context) -> BrowserState:
     """Get browser state from context."""
     return ctx.request_context.lifespan_context
+
+
+def get_current_page(ctx: Context) -> Page:
+    """Get the current active page from context."""
+    browser_state = get_browser_state(ctx)
+    return browser_state.get_current_page()
 
 
 # Navigation Tools
@@ -333,9 +435,9 @@ async def navigate(url: str, ctx: Context) -> NavigationResult:
         NavigationResult with success status, final URL (after redirects), and any errors
     """
     try:
-        browser_state = get_browser_state(ctx)
-        await browser_state.page.goto(url)
-        current_url = browser_state.page.url
+        page = get_current_page(ctx)
+        await page.goto(url)
+        current_url = page.url
         return NavigationResult(success=True, url=current_url)
     except Exception as e:
         return NavigationResult(success=False, url="", error=str(e))
@@ -355,9 +457,9 @@ async def reload(ctx: Context) -> NavigationResult:
         NavigationResult with success status, current URL, and any errors
     """
     try:
-        browser_state = get_browser_state(ctx)
-        await browser_state.page.reload()
-        current_url = browser_state.page.url
+        page = get_current_page(ctx)
+        await page.reload()
+        current_url = page.url
         return NavigationResult(success=True, url=current_url)
     except Exception as e:
         return NavigationResult(success=False, url="", error=str(e))
@@ -377,9 +479,9 @@ async def go_back(ctx: Context) -> NavigationResult:
         NavigationResult with success status, current URL after navigation, and any errors
     """
     try:
-        browser_state = get_browser_state(ctx)
-        await browser_state.page.go_back()
-        current_url = browser_state.page.url
+        page = get_current_page(ctx)
+        await page.go_back()
+        current_url = page.url
         return NavigationResult(success=True, url=current_url)
     except Exception as e:
         return NavigationResult(success=False, url="", error=str(e))
@@ -400,9 +502,9 @@ async def go_forward(ctx: Context) -> NavigationResult:
         NavigationResult with success status, current URL after navigation, and any errors
     """
     try:
-        browser_state = get_browser_state(ctx)
-        await browser_state.page.go_forward()
-        current_url = browser_state.page.url
+        page = get_current_page(ctx)
+        await page.go_forward()
+        current_url = page.url
         return NavigationResult(success=True, url=current_url)
     except Exception as e:
         return NavigationResult(success=False, url="", error=str(e))
@@ -422,8 +524,8 @@ async def get_current_url(ctx: Context) -> CurrentUrlResult:
         CurrentUrlResult with success status, URL, parsed components, query parameters, and any errors
     """
     try:
-        browser_state = get_browser_state(ctx)
-        current_url = browser_state.page.url
+        page = get_current_page(ctx)
+        current_url = page.url
         
         # Parse the URL into components
         parsed = urlparse(current_url)
@@ -450,6 +552,247 @@ async def get_current_url(ctx: Context) -> CurrentUrlResult:
         return CurrentUrlResult(success=False, error=str(e))
 
 
+# Page Management Tools
+@mcp.tool()
+async def list_pages(ctx: Context) -> PageListResult:
+    """List all open browser pages/tabs with their information.
+
+    This tool returns information about all currently open pages including their IDs,
+    URLs, titles, and which one is currently active. Use this to see all tabs/windows
+    that have been opened by user actions or JavaScript.
+
+    Args:
+        ctx: MCP context containing the browser state
+
+    Returns:
+        PageListResult with list of all pages and their details
+    """
+    try:
+        browser_state = get_browser_state(ctx)
+        pages_info = []
+
+        for page_id, page in browser_state.pages.items():
+            try:
+                pages_info.append(PageInfo(
+                    page_id=page_id,
+                    url=page.url,
+                    title=await page.title(),
+                    is_current=(page_id == browser_state.current_page_id)
+                ))
+            except Exception as e:
+                logger.error(f"Error getting info for page {page_id}: {e}")
+
+        return PageListResult(
+            success=True,
+            pages=pages_info,
+            current_page_id=browser_state.current_page_id
+        )
+    except Exception as e:
+        return PageListResult(success=False, error=str(e))
+
+
+@mcp.tool()
+async def switch_page(page_id: str, ctx: Context) -> PageSwitchResult:
+    """Switch to a different browser page/tab by its ID.
+
+    This tool changes the active page that subsequent commands will operate on.
+    Use list_pages first to get the available page IDs.
+
+    Args:
+        page_id: The ID of the page to switch to
+        ctx: MCP context containing the browser state
+
+    Returns:
+        PageSwitchResult with success status and the new active page information
+    """
+    try:
+        browser_state = get_browser_state(ctx)
+
+        if page_id not in browser_state.pages:
+            return PageSwitchResult(
+                success=False,
+                error=f"Page with ID {page_id} not found"
+            )
+
+        browser_state.set_current_page(page_id)
+        page = browser_state.pages[page_id]
+
+        return PageSwitchResult(
+            success=True,
+            page_id=page_id,
+            url=page.url
+        )
+    except Exception as e:
+        return PageSwitchResult(success=False, error=str(e))
+
+
+@mcp.tool()
+async def close_page(page_id: str, ctx: Context) -> Dict[str, Any]:
+    """Close a specific browser page/tab by its ID.
+
+    This tool closes the specified page. If it's the current page,
+    the tool will automatically switch to another available page.
+    Cannot close the last remaining page.
+
+    Args:
+        page_id: The ID of the page to close
+        ctx: MCP context containing the browser state
+
+    Returns:
+        Dict with success status, closed page ID, and any error messages
+    """
+    try:
+        browser_state = get_browser_state(ctx)
+
+        if page_id not in browser_state.pages:
+            return {
+                "success": False,
+                "error": f"Page with ID {page_id} not found"
+            }
+
+        if len(browser_state.pages) <= 1:
+            return {
+                "success": False,
+                "error": "Cannot close the last remaining page"
+            }
+
+        # Close the page
+        page = browser_state.pages[page_id]
+        await page.close()
+
+        # Remove from tracking
+        del browser_state.pages[page_id]
+
+        # If this was the current page, switch to another
+        if browser_state.current_page_id == page_id:
+            # Get first available page
+            new_page_id = next(iter(browser_state.pages.keys()))
+            browser_state.set_current_page(new_page_id)
+
+        return {
+            "success": True,
+            "closed_page_id": page_id,
+            "current_page_id": browser_state.current_page_id
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+async def wait_for_popup(ctx: Context, timeout: int = 5000) -> NewPageResult:
+    """Wait for a new popup window or tab to be opened.
+
+    This tool waits for a new page to be created (e.g., from clicking a link with
+    target="_blank" or JavaScript window.open()). It's useful when you know an
+    action will open a new window/tab and you want to capture it.
+
+    Args:
+        timeout: Maximum time to wait in milliseconds (default: 5000)
+        ctx: MCP context containing the browser state
+
+    Returns:
+        NewPageResult with information about the new page
+    """
+    import asyncio
+    import uuid
+
+    try:
+        browser_state = get_browser_state(ctx)
+
+        # Store the current page ID as the opener
+        opener_page_id = browser_state.current_page_id
+
+        # Create a future to wait for the new page
+        new_page_future = asyncio.Future()
+
+        def handle_page(page: Page):
+            """Handle the new page event."""
+            if not new_page_future.done():
+                new_page_future.set_result(page)
+
+        # Temporarily listen for new pages
+        browser_state.context.once("page", handle_page)
+
+        try:
+            # Wait for new page with timeout
+            new_page = await asyncio.wait_for(
+                new_page_future,
+                timeout=timeout / 1000  # Convert to seconds
+            )
+
+            # Generate ID for the new page
+            page_id = str(uuid.uuid4())
+
+            # Set default timeout for new page
+            new_page.set_default_timeout(config.timeout)
+
+            # Add to pages dictionary
+            browser_state.pages[page_id] = new_page
+
+            # Set up network monitoring for the new page
+            await _setup_network_monitoring_for_page(browser_state, new_page)
+
+            # Wait a bit for the page to load initial content
+            try:
+                await new_page.wait_for_load_state("domcontentloaded", timeout=1000)
+            except:
+                pass  # Page might still be loading, that's OK
+
+            return NewPageResult(
+                success=True,
+                page_id=page_id,
+                url=new_page.url,
+                opener_page_id=opener_page_id
+            )
+
+        except asyncio.TimeoutError:
+            return NewPageResult(
+                success=False,
+                error=f"No new page opened within {timeout}ms"
+            )
+
+    except Exception as e:
+        return NewPageResult(success=False, error=str(e))
+
+
+@mcp.tool()
+async def switch_to_latest_page(ctx: Context) -> PageSwitchResult:
+    """Switch to the most recently opened page/tab.
+
+    This is a convenience tool that switches to the newest page without
+    needing to know its ID. Useful after clicking a link that opens
+    in a new tab/window.
+
+    Args:
+        ctx: MCP context containing the browser state
+
+    Returns:
+        PageSwitchResult with success status and the new active page information
+    """
+    try:
+        browser_state = get_browser_state(ctx)
+
+        if not browser_state.pages:
+            return PageSwitchResult(
+                success=False,
+                error="No pages available"
+            )
+
+        # Get the last page ID (most recently added)
+        latest_page_id = list(browser_state.pages.keys())[-1]
+
+        browser_state.set_current_page(latest_page_id)
+        page = browser_state.pages[latest_page_id]
+
+        return PageSwitchResult(
+            success=True,
+            page_id=latest_page_id,
+            url=page.url
+        )
+    except Exception as e:
+        return PageSwitchResult(success=False, error=str(e))
+
+
 # DOM Interaction Tools
 @mcp.tool()
 async def click(selector: str, ctx: Context) -> Dict[str, Any]:
@@ -466,8 +809,8 @@ async def click(selector: str, ctx: Context) -> Dict[str, Any]:
         Dict with success status, selector used, and any error messages
     """
     try:
-        browser_state = get_browser_state(ctx)
-        await browser_state.page.click(selector)
+        page = get_current_page(ctx)
+        await page.click(selector)
         return {"success": True, "selector": selector}
     except Exception as e:
         return {"success": False, "selector": selector, "error": str(e)}
@@ -489,8 +832,8 @@ async def type_text(selector: str, text: str, ctx: Context) -> Dict[str, Any]:
         Dict with success status, selector, text typed, and any error messages
     """
     try:
-        browser_state = get_browser_state(ctx)
-        await browser_state.page.type(selector, text)
+        page = get_current_page(ctx)
+        await page.type(selector, text)
         return {"success": True, "selector": selector, "text": text}
     except Exception as e:
         return {"success": False, "selector": selector, "text": text, "error": str(e)}
@@ -512,8 +855,8 @@ async def fill(selector: str, value: str, ctx: Context) -> Dict[str, Any]:
         Dict with success status, selector, value set, and any error messages
     """
     try:
-        browser_state = get_browser_state(ctx)
-        await browser_state.page.fill(selector, value)
+        page = get_current_page(ctx)
+        await page.fill(selector, value)
         return {"success": True, "selector": selector, "value": value}
     except Exception as e:
         return {"success": False, "selector": selector, "value": value, "error": str(e)}
@@ -534,8 +877,8 @@ async def select_option(selector: str, value: str, ctx: Context) -> Dict[str, An
         Dict with success status, selector, selected value, and any error messages
     """
     try:
-        browser_state = get_browser_state(ctx)
-        await browser_state.page.select_option(selector, value)
+        page = get_current_page(ctx)
+        await page.select_option(selector, value)
         return {"success": True, "selector": selector, "value": value}
     except Exception as e:
         return {"success": False, "selector": selector, "value": value, "error": str(e)}
@@ -556,8 +899,8 @@ async def hover(selector: str, ctx: Context) -> Dict[str, Any]:
         Dict with success status, selector, and any error messages
     """
     try:
-        browser_state = get_browser_state(ctx)
-        await browser_state.page.hover(selector)
+        page = get_current_page(ctx)
+        await page.hover(selector)
         return {"success": True, "selector": selector}
     except Exception as e:
         return {"success": False, "selector": selector, "error": str(e)}
@@ -580,9 +923,9 @@ async def scroll(selector: str, ctx: Context, x: int = 0, y: int = 0) -> Dict[st
         Dict with success status, selector, scroll amounts, and any error messages
     """
     try:
-        browser_state = get_browser_state(ctx)
+        page = get_current_page(ctx)
         if selector:
-            element = await browser_state.page.query_selector(selector)
+            element = await page.query_selector(selector)
             if element:
                 await element.scroll_into_view_if_needed()
                 return {"success": True, "selector": selector, "x": x, "y": y}
@@ -593,7 +936,7 @@ async def scroll(selector: str, ctx: Context, x: int = 0, y: int = 0) -> Dict[st
                     "error": "Element not found",
                 }
         else:
-            await browser_state.page.mouse.wheel(x, y)
+            await page.mouse.wheel(x, y)
             return {"success": True, "selector": selector, "x": x, "y": y}
     except Exception as e:
         return {"success": False, "selector": selector, "x": x, "y": y, "error": str(e)}
@@ -616,7 +959,7 @@ async def query_selector(selector: str, ctx: Context) -> ElementQueryResult:
     """
     try:
         browser_state = get_browser_state(ctx)
-        element = await browser_state.page.query_selector(selector)
+        element = await page.query_selector(selector)
         if element:
             # Get element attributes
             tag_name = await element.evaluate("el => el.tagName")
@@ -654,7 +997,7 @@ async def query_selector_all(selector: str, ctx: Context) -> ElementQueryResult:
     """
     try:
         browser_state = get_browser_state(ctx)
-        elements = await browser_state.page.query_selector_all(selector)
+        elements = await page.query_selector_all(selector)
 
         elements_info = []
         for element in elements:
@@ -695,7 +1038,7 @@ async def get_html(ctx: Context) -> Dict[str, Any]:
     """
     try:
         browser_state = get_browser_state(ctx)
-        html = await browser_state.page.content()
+        html = await page.content()
         return {"success": True, "html": html}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -716,7 +1059,7 @@ async def get_accessibility_snapshot(ctx: Context) -> Dict[str, Any]:
     """
     try:
         browser_state = get_browser_state(ctx)
-        snapshot = await browser_state.page.accessibility.snapshot()
+        snapshot = await page.accessibility.snapshot()
         return {"success": True, "snapshot": snapshot}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -740,16 +1083,16 @@ async def screenshot(
         ScreenshotResult with success status, base64-encoded PNG data, format, and any errors
     """
     try:
-        browser_state = get_browser_state(ctx)
+        page = get_current_page(ctx)
 
         if selector:
-            element = await browser_state.page.query_selector(selector)
+            element = await page.query_selector(selector)
             if element:
                 screenshot_bytes = await element.screenshot()
             else:
                 return ScreenshotResult(success=False, error="Element not found")
         else:
-            screenshot_bytes = await browser_state.page.screenshot(full_page=full_page)
+            screenshot_bytes = await page.screenshot(full_page=full_page)
 
         # Encode as base64
         screenshot_base64 = base64.b64encode(screenshot_bytes).decode("utf-8")
@@ -774,7 +1117,7 @@ async def pdf(ctx: Context) -> PDFResult:
     """
     try:
         browser_state = get_browser_state(ctx)
-        pdf_bytes = await browser_state.page.pdf()
+        pdf_bytes = await page.pdf()
 
         # Encode as base64
         pdf_base64 = base64.b64encode(pdf_bytes).decode("utf-8")
@@ -801,7 +1144,7 @@ async def evaluate(script: str, ctx: Context) -> ScriptResult:
     """
     try:
         browser_state = get_browser_state(ctx)
-        result = await browser_state.page.evaluate(script)
+        result = await page.evaluate(script)
         return ScriptResult(success=True, result=result)
     except Exception as e:
         return ScriptResult(success=False, error=str(e))
@@ -824,7 +1167,7 @@ async def is_visible(selector: str, ctx: Context) -> Dict[str, Any]:
     """
     try:
         browser_state = get_browser_state(ctx)
-        element = await browser_state.page.query_selector(selector)
+        element = await page.query_selector(selector)
         if element:
             visible = await element.is_visible()
             return {"success": True, "selector": selector, "visible": visible}
@@ -854,7 +1197,7 @@ async def is_enabled(selector: str, ctx: Context) -> Dict[str, Any]:
     """
     try:
         browser_state = get_browser_state(ctx)
-        element = await browser_state.page.query_selector(selector)
+        element = await page.query_selector(selector)
         if element:
             enabled = await element.is_enabled()
             return {"success": True, "selector": selector, "enabled": enabled}
@@ -887,7 +1230,7 @@ async def wait_for_element(
     """
     try:
         browser_state = get_browser_state(ctx)
-        await browser_state.page.wait_for_selector(selector, timeout=timeout)
+        await page.wait_for_selector(selector, timeout=timeout)
         return {"success": True, "selector": selector, "timeout": timeout}
     except Exception as e:
         return {
@@ -917,7 +1260,7 @@ async def wait_for_load_state(
     """
     try:
         browser_state = get_browser_state(ctx)
-        await browser_state.page.wait_for_load_state(state, timeout=timeout)
+        await page.wait_for_load_state(state, timeout=timeout)
         return {"success": True, "state": state, "timeout": timeout}
     except Exception as e:
         return {"success": False, "state": state, "timeout": timeout, "error": str(e)}
@@ -940,7 +1283,7 @@ async def clear_text(selector: str, ctx: Context) -> Dict[str, Any]:
     """
     try:
         browser_state = get_browser_state(ctx)
-        await browser_state.page.fill(selector, "")
+        await page.fill(selector, "")
         return {"success": True, "selector": selector}
     except Exception as e:
         return {"success": False, "selector": selector, "error": str(e)}
@@ -962,7 +1305,7 @@ async def check_checkbox(selector: str, ctx: Context) -> Dict[str, Any]:
     """
     try:
         browser_state = get_browser_state(ctx)
-        await browser_state.page.check(selector)
+        await page.check(selector)
         return {"success": True, "selector": selector, "action": "checked"}
     except Exception as e:
         return {"success": False, "selector": selector, "error": str(e)}
@@ -984,7 +1327,7 @@ async def uncheck_checkbox(selector: str, ctx: Context) -> Dict[str, Any]:
     """
     try:
         browser_state = get_browser_state(ctx)
-        await browser_state.page.uncheck(selector)
+        await page.uncheck(selector)
         return {"success": True, "selector": selector, "action": "unchecked"}
     except Exception as e:
         return {"success": False, "selector": selector, "error": str(e)}
@@ -1007,7 +1350,7 @@ async def upload_file(selector: str, file_path: str, ctx: Context) -> Dict[str, 
     """
     try:
         browser_state = get_browser_state(ctx)
-        await browser_state.page.set_input_files(selector, file_path)
+        await page.set_input_files(selector, file_path)
         return {"success": True, "selector": selector, "file_path": file_path}
     except Exception as e:
         return {
@@ -1034,7 +1377,7 @@ async def press_key(key: str, ctx: Context) -> Dict[str, Any]:
     """
     try:
         browser_state = get_browser_state(ctx)
-        await browser_state.page.keyboard.press(key)
+        await page.keyboard.press(key)
         return {"success": True, "key": key}
     except Exception as e:
         return {"success": False, "key": key, "error": str(e)}
@@ -1060,8 +1403,8 @@ async def wait_for_url(
     """
     try:
         browser_state = get_browser_state(ctx)
-        await browser_state.page.wait_for_url(url_pattern, timeout=timeout)
-        current_url = browser_state.page.url
+        await page.wait_for_url(url_pattern, timeout=timeout)
+        current_url = page.url
         return {
             "success": True,
             "url_pattern": url_pattern,
@@ -1094,7 +1437,7 @@ async def set_viewport_size(width: int, height: int, ctx: Context) -> Dict[str, 
     """
     try:
         browser_state = get_browser_state(ctx)
-        await browser_state.page.set_viewport_size({"width": width, "height": height})
+        await page.set_viewport_size({"width": width, "height": height})
         return {"success": True, "width": width, "height": height}
     except Exception as e:
         return {"success": False, "width": width, "height": height, "error": str(e)}
@@ -1117,7 +1460,7 @@ async def get_element_bounding_box(selector: str, ctx: Context) -> Dict[str, Any
     """
     try:
         browser_state = get_browser_state(ctx)
-        element = await browser_state.page.query_selector(selector)
+        element = await page.query_selector(selector)
         if element:
             box = await element.bounding_box()
             return {"success": True, "selector": selector, "bounding_box": box}
@@ -1147,7 +1490,7 @@ async def get_element_attributes(selector: str, ctx: Context) -> Dict[str, Any]:
     """
     try:
         browser_state = get_browser_state(ctx)
-        element = await browser_state.page.query_selector(selector)
+        element = await page.query_selector(selector)
         if element:
             attributes = await element.evaluate(
                 "el => Object.fromEntries(Array.from(el.attributes).map(attr => [attr.name, attr.value]))"
@@ -1182,7 +1525,7 @@ async def get_computed_style(
     """
     try:
         browser_state = get_browser_state(ctx)
-        element = await browser_state.page.query_selector(selector)
+        element = await page.query_selector(selector)
         if element:
             style_value = await element.evaluate(
                 f"el => getComputedStyle(el).{property}"
@@ -1224,8 +1567,8 @@ async def wait_for_network_idle(ctx: Context, timeout: int = 30000) -> Dict[str,
         Dict with success status, timeout value, and any errors
     """
     try:
-        browser_state = get_browser_state(ctx)
-        await browser_state.page.wait_for_load_state("networkidle", timeout=timeout)
+        page = get_current_page(ctx)
+        await page.wait_for_load_state("networkidle", timeout=timeout)
         return {"success": True, "timeout": timeout}
     except Exception as e:
         return {"success": False, "timeout": timeout, "error": str(e)}
@@ -1245,10 +1588,10 @@ async def get_page_errors(ctx: Context) -> Dict[str, Any]:
         Dict with success status, array of error messages, and any errors
     """
     try:
-        browser_state = get_browser_state(ctx)
+        page = get_current_page(ctx)
         # Note: This would require setting up error listeners during browser initialization
         # For now, we'll evaluate to check for any stored errors
-        errors = await browser_state.page.evaluate(
+        errors = await page.evaluate(
             """
             () => {
                 if (window.pageErrors) {
@@ -1277,10 +1620,10 @@ async def get_console_logs(ctx: Context) -> Dict[str, Any]:
         Dict with success status, array of console messages, setup note, and any errors
     """
     try:
-        browser_state = get_browser_state(ctx)
+        page = get_current_page(ctx)
         # Note: This would require setting up console listeners during browser initialization
         # For now, we'll return a message about setup requirements
-        logs = await browser_state.page.evaluate(
+        logs = await page.evaluate(
             """
             () => {
                 if (window.consoleLogs) {
@@ -1420,7 +1763,7 @@ async def intercept_route(
         Dict with success status, intercepted pattern, action, and any errors
     """
     try:
-        browser_state = get_browser_state(ctx)
+        page = get_current_page(ctx)
 
         async def route_handler(route: Route, request: Request):
             if action == "block":
@@ -1434,7 +1777,7 @@ async def intercept_route(
             else:  # continue
                 await route.continue_()
 
-        await browser_state.page.route(url_pattern, route_handler)
+        await page.route(url_pattern, route_handler)
 
         return {
             "success": True,
@@ -1460,8 +1803,8 @@ async def unroute_all(ctx: Context) -> Dict[str, Any]:
         Dict with success status and any errors
     """
     try:
-        browser_state = get_browser_state(ctx)
-        await browser_state.page.unroute_all()
+        page = get_current_page(ctx)
+        await page.unroute_all()
         return {"success": True}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -1486,7 +1829,7 @@ async def wait_for_response(
     """
     try:
         browser_state = get_browser_state(ctx)
-        response = await browser_state.page.wait_for_response(
+        response = await page.wait_for_response(
             url_pattern, timeout=timeout
         )
 
@@ -1524,6 +1867,7 @@ async def get_response_body(ctx: Context, url_pattern: str) -> Dict[str, Any]:
         import fnmatch
 
         browser_state = get_browser_state(ctx)
+        page = get_current_page(ctx)
 
         # Find the most recent matching response
         matching_responses = [
@@ -1536,7 +1880,7 @@ async def get_response_body(ctx: Context, url_pattern: str) -> Dict[str, Any]:
             return {"success": False, "error": "No matching responses found"}
 
         # Get the actual response object to fetch body
-        response = await browser_state.page.wait_for_response(url_pattern, timeout=5000)
+        response = await page.wait_for_response(url_pattern, timeout=5000)
         body = await response.text()
 
         return {
@@ -1648,6 +1992,7 @@ async def get_local_storage(
     """
     try:
         browser_state = get_browser_state(ctx)
+        page = get_current_page(ctx)
 
         if origin:
             # Get storage for specific origin
@@ -1663,7 +2008,7 @@ async def get_local_storage(
             data = origin_storage
         else:
             # Get localStorage for current page
-            data = await browser_state.page.evaluate(
+            data = await page.evaluate(
                 """
                 () => {
                     const storage = {};
@@ -1699,7 +2044,7 @@ async def set_local_storage(ctx: Context, key: str, value: str) -> StorageResult
     try:
         browser_state = get_browser_state(ctx)
 
-        await browser_state.page.evaluate(
+        await page.evaluate(
             """
             (args) => localStorage.setItem(args.key, args.value)
         """,
@@ -1727,7 +2072,7 @@ async def get_session_storage(ctx: Context) -> StorageResult:
     try:
         browser_state = get_browser_state(ctx)
 
-        data = await browser_state.page.evaluate(
+        data = await page.evaluate(
             """
             () => {
                 const storage = {};
@@ -1763,7 +2108,7 @@ async def set_session_storage(ctx: Context, key: str, value: str) -> StorageResu
     try:
         browser_state = get_browser_state(ctx)
 
-        await browser_state.page.evaluate(
+        await page.evaluate(
             """
             (args) => sessionStorage.setItem(args.key, args.value)
         """,
@@ -1798,7 +2143,7 @@ async def clear_storage(ctx: Context, storage_type: str = "both") -> StorageResu
         if storage_type in ["session", "both"]:
             script += "sessionStorage.clear();"
 
-        await browser_state.page.evaluate(script)
+        await page.evaluate(script)
 
         return StorageResult(success=True, data={"cleared": storage_type})
     except Exception as e:
@@ -1822,7 +2167,7 @@ async def set_extra_headers(ctx: Context, headers: Dict[str, str]) -> Dict[str, 
     """
     try:
         browser_state = get_browser_state(ctx)
-        await browser_state.page.set_extra_http_headers(headers)
+        await page.set_extra_http_headers(headers)
 
         return {"success": True, "headers": headers}
     except Exception as e:
@@ -1845,7 +2190,7 @@ async def set_user_agent(ctx: Context, user_agent: str) -> Dict[str, Any]:
     """
     try:
         browser_state = get_browser_state(ctx)
-        await browser_state.page.set_user_agent(user_agent)
+        await page.set_user_agent(user_agent)
 
         return {"success": True, "user_agent": user_agent}
     except Exception as e:
