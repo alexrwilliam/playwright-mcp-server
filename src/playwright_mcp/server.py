@@ -958,7 +958,7 @@ async def query_selector(selector: str, ctx: Context) -> ElementQueryResult:
         ElementQueryResult with found status, element details (tag, text, attributes), and any errors
     """
     try:
-        browser_state = get_browser_state(ctx)
+        page = get_current_page(ctx)
         element = await page.query_selector(selector)
         if element:
             # Get element attributes
@@ -996,7 +996,7 @@ async def query_selector_all(selector: str, ctx: Context) -> ElementQueryResult:
         ElementQueryResult with found status, count, array of element details, and any errors
     """
     try:
-        browser_state = get_browser_state(ctx)
+        page = get_current_page(ctx)
         elements = await page.query_selector_all(selector)
 
         elements_info = []
@@ -1037,7 +1037,7 @@ async def get_html(ctx: Context) -> Dict[str, Any]:
         Dict with success status and the complete HTML source as a string
     """
     try:
-        browser_state = get_browser_state(ctx)
+        page = get_current_page(ctx)
         html = await page.content()
         return {"success": True, "html": html}
     except Exception as e:
@@ -1058,7 +1058,7 @@ async def get_accessibility_snapshot(ctx: Context) -> Dict[str, Any]:
         Dict with success status and the accessibility tree snapshot structure
     """
     try:
-        browser_state = get_browser_state(ctx)
+        page = get_current_page(ctx)
         snapshot = await page.accessibility.snapshot()
         return {"success": True, "snapshot": snapshot}
     except Exception as e:
@@ -1116,7 +1116,7 @@ async def pdf(ctx: Context) -> PDFResult:
         PDFResult with success status, base64-encoded PDF data, and any errors
     """
     try:
-        browser_state = get_browser_state(ctx)
+        page = get_current_page(ctx)
         pdf_bytes = await page.pdf()
 
         # Encode as base64
@@ -1143,7 +1143,7 @@ async def evaluate(script: str, ctx: Context) -> ScriptResult:
         ScriptResult with success status, execution result (if any), and any errors
     """
     try:
-        browser_state = get_browser_state(ctx)
+        page = get_current_page(ctx)
         result = await page.evaluate(script)
         return ScriptResult(success=True, result=result)
     except Exception as e:
@@ -1166,7 +1166,7 @@ async def is_visible(selector: str, ctx: Context) -> Dict[str, Any]:
         Dict with success status, selector, visibility boolean, and any errors
     """
     try:
-        browser_state = get_browser_state(ctx)
+        page = get_current_page(ctx)
         element = await page.query_selector(selector)
         if element:
             visible = await element.is_visible()
@@ -1196,7 +1196,7 @@ async def is_enabled(selector: str, ctx: Context) -> Dict[str, Any]:
         Dict with success status, selector, enabled boolean, and any errors
     """
     try:
-        browser_state = get_browser_state(ctx)
+        page = get_current_page(ctx)
         element = await page.query_selector(selector)
         if element:
             enabled = await element.is_enabled()
@@ -1229,7 +1229,7 @@ async def wait_for_element(
         Dict with success status, selector, timeout value, and any errors
     """
     try:
-        browser_state = get_browser_state(ctx)
+        page = get_current_page(ctx)
         await page.wait_for_selector(selector, timeout=timeout)
         return {"success": True, "selector": selector, "timeout": timeout}
     except Exception as e:
@@ -1259,7 +1259,7 @@ async def wait_for_load_state(
         Dict with success status, target state, timeout value, and any errors
     """
     try:
-        browser_state = get_browser_state(ctx)
+        page = get_current_page(ctx)
         await page.wait_for_load_state(state, timeout=timeout)
         return {"success": True, "state": state, "timeout": timeout}
     except Exception as e:
@@ -1282,7 +1282,7 @@ async def clear_text(selector: str, ctx: Context) -> Dict[str, Any]:
         Dict with success status, selector, and any errors
     """
     try:
-        browser_state = get_browser_state(ctx)
+        page = get_current_page(ctx)
         await page.fill(selector, "")
         return {"success": True, "selector": selector}
     except Exception as e:
@@ -1304,7 +1304,7 @@ async def check_checkbox(selector: str, ctx: Context) -> Dict[str, Any]:
         Dict with success status, selector, action performed, and any errors
     """
     try:
-        browser_state = get_browser_state(ctx)
+        page = get_current_page(ctx)
         await page.check(selector)
         return {"success": True, "selector": selector, "action": "checked"}
     except Exception as e:
@@ -1326,7 +1326,7 @@ async def uncheck_checkbox(selector: str, ctx: Context) -> Dict[str, Any]:
         Dict with success status, selector, action performed, and any errors
     """
     try:
-        browser_state = get_browser_state(ctx)
+        page = get_current_page(ctx)
         await page.uncheck(selector)
         return {"success": True, "selector": selector, "action": "unchecked"}
     except Exception as e:
@@ -1349,7 +1349,7 @@ async def upload_file(selector: str, file_path: str, ctx: Context) -> Dict[str, 
         Dict with success status, selector, file path, and any errors
     """
     try:
-        browser_state = get_browser_state(ctx)
+        page = get_current_page(ctx)
         await page.set_input_files(selector, file_path)
         return {"success": True, "selector": selector, "file_path": file_path}
     except Exception as e:
@@ -1376,7 +1376,7 @@ async def press_key(key: str, ctx: Context) -> Dict[str, Any]:
         Dict with success status, key pressed, and any errors
     """
     try:
-        browser_state = get_browser_state(ctx)
+        page = get_current_page(ctx)
         await page.keyboard.press(key)
         return {"success": True, "key": key}
     except Exception as e:
@@ -1402,7 +1402,7 @@ async def wait_for_url(
         Dict with success status, URL pattern, current URL, timeout, and any errors
     """
     try:
-        browser_state = get_browser_state(ctx)
+        page = get_current_page(ctx)
         await page.wait_for_url(url_pattern, timeout=timeout)
         current_url = page.url
         return {
@@ -1436,7 +1436,7 @@ async def set_viewport_size(width: int, height: int, ctx: Context) -> Dict[str, 
         Dict with success status, new dimensions, and any errors
     """
     try:
-        browser_state = get_browser_state(ctx)
+        page = get_current_page(ctx)
         await page.set_viewport_size({"width": width, "height": height})
         return {"success": True, "width": width, "height": height}
     except Exception as e:
@@ -1459,7 +1459,7 @@ async def get_element_bounding_box(selector: str, ctx: Context) -> Dict[str, Any
         Dict with success status, selector, bounding box (x, y, width, height), and any errors
     """
     try:
-        browser_state = get_browser_state(ctx)
+        page = get_current_page(ctx)
         element = await page.query_selector(selector)
         if element:
             box = await element.bounding_box()
@@ -1489,7 +1489,7 @@ async def get_element_attributes(selector: str, ctx: Context) -> Dict[str, Any]:
         Dict with success status, selector, attributes dictionary, and any errors
     """
     try:
-        browser_state = get_browser_state(ctx)
+        page = get_current_page(ctx)
         element = await page.query_selector(selector)
         if element:
             attributes = await element.evaluate(
@@ -1524,7 +1524,7 @@ async def get_computed_style(
         Dict with success status, selector, property name, computed value, and any errors
     """
     try:
-        browser_state = get_browser_state(ctx)
+        page = get_current_page(ctx)
         element = await page.query_selector(selector)
         if element:
             style_value = await element.evaluate(
@@ -1828,7 +1828,7 @@ async def wait_for_response(
         Dict with success status, response details (URL, status), and any errors
     """
     try:
-        browser_state = get_browser_state(ctx)
+        page = get_current_page(ctx)
         response = await page.wait_for_response(
             url_pattern, timeout=timeout
         )
@@ -2042,7 +2042,7 @@ async def set_local_storage(ctx: Context, key: str, value: str) -> StorageResult
         StorageResult with success status, set data, and any errors
     """
     try:
-        browser_state = get_browser_state(ctx)
+        page = get_current_page(ctx)
 
         await page.evaluate(
             """
@@ -2070,7 +2070,7 @@ async def get_session_storage(ctx: Context) -> StorageResult:
         StorageResult with success status, sessionStorage data as dict, and any errors
     """
     try:
-        browser_state = get_browser_state(ctx)
+        page = get_current_page(ctx)
 
         data = await page.evaluate(
             """
@@ -2106,7 +2106,7 @@ async def set_session_storage(ctx: Context, key: str, value: str) -> StorageResu
         StorageResult with success status, set data, and any errors
     """
     try:
-        browser_state = get_browser_state(ctx)
+        page = get_current_page(ctx)
 
         await page.evaluate(
             """
@@ -2166,7 +2166,7 @@ async def set_extra_headers(ctx: Context, headers: Dict[str, str]) -> Dict[str, 
         Dict with success status, set headers, and any errors
     """
     try:
-        browser_state = get_browser_state(ctx)
+        page = get_current_page(ctx)
         await page.set_extra_http_headers(headers)
 
         return {"success": True, "headers": headers}
@@ -2189,7 +2189,7 @@ async def set_user_agent(ctx: Context, user_agent: str) -> Dict[str, Any]:
         Dict with success status, set user agent, and any errors
     """
     try:
-        browser_state = get_browser_state(ctx)
+        page = get_current_page(ctx)
         await page.set_user_agent(user_agent)
 
         return {"success": True, "user_agent": user_agent}
