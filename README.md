@@ -148,9 +148,10 @@ uv run mcp dev src/playwright_mcp/server.py
 - `upload_file(selector: str, file_path: str)` - Upload file to input
 
 #### Element Discovery & Validation
-- `query_selector(selector: str)` - Query for single element
-- `query_selector_all(selector: str)` - Query for all matching elements
-- Both element query tools obey the configured output caps and return `truncated` / `returned_count` metadata when results are clipped.
+- `query_selector(selector: str, max_text_length: int | None = None)` - Query for single element (optional per-call text cap override)
+- `query_selector_all(selector: str, max_elements: int | None = None, max_text_length: int | None = None)` - Query for all matching elements (optional per-call overrides)
+- `query_selector_meta(selector: str, preview_length: int = 200, max_elements: int | None = None)` - Quick metadata preview (tag, role, short text, key attributes)
+- Element query tools obey global caps, accept per-call overrides, and return `truncated` / `returned_count` metadata when results are clipped.
 - `is_visible(selector: str)` - Check if element is visible
 - `is_enabled(selector: str)` - Check if element is enabled
 - `wait_for_element(selector: str, timeout: int)` - Wait for element to appear
@@ -160,8 +161,8 @@ uv run mcp dev src/playwright_mcp/server.py
 
 #### Content & Snapshots
 - `get_html()` - Get page HTML
-- `get_accessibility_snapshot()` - Get accessibility tree
-- Accessibility snapshots are pruned to the configured node budget and include `truncated`, `max_nodes`, and `node_count` metadata.
+- `get_accessibility_snapshot(interesting_only: bool = True, root_selector: str | None = None, max_nodes: int | None = None)` - Get accessibility tree with optional filters and per-call node caps
+- Accessibility snapshots are pruned to the configured node budget, accept per-call overrides, and include `truncated`, `max_nodes`, and `node_count` metadata.
 - `screenshot(selector: str, full_page: bool)` - Take screenshot of page or element
 - `pdf()` - Generate PDF of page
 

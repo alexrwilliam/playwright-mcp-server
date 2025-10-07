@@ -95,6 +95,17 @@ class ElementQueryResult(BaseModel):
     error: Optional[str] = None
 
 
+class ElementMetaResult(BaseModel):
+    """Lightweight element metadata result."""
+
+    found: bool
+    count: int
+    elements: List[Dict[str, Any]] = Field(default_factory=list)
+    truncated: bool = False
+    returned_count: Optional[int] = None
+    error: Optional[str] = None
+
+
 class ScreenshotResult(BaseModel):
     """Screenshot result."""
 
@@ -504,6 +515,26 @@ def _prune_accessibility_snapshot(
 
     pruned_snapshot = prune(snapshot)
     return pruned_snapshot, truncated, included
+
+
+def _resolve_limit(default_value: int, override: Optional[int]) -> int:
+    if override is None:
+        return default_value
+    return override
+
+
+META_ATTRIBUTE_KEYS = {
+    "id",
+    "class",
+    "name",
+    "role",
+    "aria-label",
+    "aria-labelledby",
+    "aria-describedby",
+    "data-testid",
+    "data-test",
+    "data-qa",
+}
 
 
 # Navigation Tools
@@ -1031,7 +1062,9 @@ async def scroll(selector: str, ctx: Context, x: int = 0, y: int = 0) -> Dict[st
 
 # Element Discovery Tools
 @mcp.tool()
-async def query_selector(selector: str, ctx: Context) -> ElementQueryResult:
+async def query_selector(
+    selector: str, ctx: Context, max_text_length: Optional[int] = None
+) -> ElementQueryResult:
     """Find and return information about the first element matching a selector.
 
     This tool locates a single element on the page and returns detailed information
@@ -1040,6 +1073,7 @@ async def query_selector(selector: str, ctx: Context) -> ElementQueryResult:
     Args:
         selector: Playwright selector to find the element (e.g., "#main-header", "button:has-text('Submit')", "[data-testid=login]")
         ctx: MCP context containing the browser state
+        max_text_length: Optional override for maximum characters returned for text and attributes (<=0 disables)
 
     Returns:
         ElementQueryResult with found status, element details (tag, text, attributes), and any errors
@@ -1055,11 +1089,12 @@ async def query_selector(selector: str, ctx: Context) -> ElementQueryResult:
                 "el => Object.fromEntries(Array.from(el.attributes).map(attr => [attr.name, attr.value]))"
             )
 
-            text_content, text_truncated = _truncate_text(
-                text_content, config.max_element_text_length
+            text_limit = _resolve_limit(
+                config.max_element_text_length, max_text_length
             )
+            text_content, text_truncated = _truncate_text(text_content, text_limit)
             attributes, attributes_truncated = _truncate_attributes(
-                attributes, config.max_element_text_length
+                attributes, text_limit
             )
 
             element_info: Dict[str, Any] = {
@@ -1087,7 +1122,12 @@ async def query_selector(selector: str, ctx: Context) -> ElementQueryResult:
 
 
 @mcp.tool()
-async def query_selector_all(selector: str, ctx: Context) -> ElementQueryResult:
+async def query_selector_all(
+    selector: str,
+    ctx: Context,
+    max_elements: Optional[int] = None,
+    max_text_length: Optional[int] = None,
+) -> ElementQueryResult:
     """Find and return information about all elements matching a selector.
 
     This tool locates all elements on the page that match the selector and returns
@@ -1096,6 +1136,8 @@ async def query_selector_all(selector: str, ctx: Context) -> ElementQueryResult:
     Args:
         selector: Playwright selector to find elements (e.g., ".nav-item", "input[type=checkbox]", "li")
         ctx: MCP context containing the browser state
+        max_elements: Optional override for number of elements returned (<=0 disables)
+        max_text_length: Optional override for maximum characters returned per element (<=0 disables)
 
     Returns:
         ElementQueryResult with found status, count, array of element details, and any errors
@@ -1105,9 +1147,9 @@ async def query_selector_all(selector: str, ctx: Context) -> ElementQueryResult:
         elements = await page.query_selector_all(selector)
 
         total_count = len(elements)
-        max_elements = config.max_elements_returned
-        if max_elements > 0:
-            elements = elements[:max_elements]
+        element_limit = _resolve_limit(config.max_elements_returned, max_elements)
+        if element_limit > 0:
+            elements = elements[:element_limit]
 
         elements_info = []
         any_truncated = total_count > len(elements)
@@ -1119,11 +1161,12 @@ async def query_selector_all(selector: str, ctx: Context) -> ElementQueryResult:
                 "el => Object.fromEntries(Array.from(el.attributes).map(attr => [attr.name, attr.value]))"
             )
 
-            text_content, text_truncated = _truncate_text(
-                text_content, config.max_element_text_length
+            text_limit = _resolve_limit(
+                config.max_element_text_length, max_text_length
             )
+            text_content, text_truncated = _truncate_text(text_content, text_limit)
             attributes, attributes_truncated = _truncate_attributes(
-                attributes, config.max_element_text_length
+                attributes, text_limit
             )
 
             if text_truncated or attributes_truncated:
@@ -1153,6 +1196,88 @@ async def query_selector_all(selector: str, ctx: Context) -> ElementQueryResult:
         return ElementQueryResult(found=False, count=0, error=str(e))
 
 
+@mcp.tool()
+async def query_selector_meta(
+    selector: str,
+    ctx: Context,
+    preview_length: int = 200,
+    max_elements: Optional[int] = None,
+) -> ElementMetaResult:
+    """Return lightweight metadata for elements matching a selector.
+
+    Provides tag name, role, a short text preview, and key attributes without
+    dumping full text content. Useful for scouting before fetching full details.
+
+    Args:
+        selector: Playwright selector to find elements
+        ctx: MCP context containing the browser state
+        preview_length: Maximum characters to include in the text preview (<=0 disables)
+        max_elements: Optional override for number of elements returned (<=0 disables)
+    """
+
+    try:
+        page = get_current_page(ctx)
+        elements = await page.query_selector_all(selector)
+
+        total_count = len(elements)
+        element_limit = _resolve_limit(config.max_elements_returned, max_elements)
+        if element_limit > 0:
+            elements = elements[:element_limit]
+
+        elements_info = []
+        any_truncated = total_count > len(elements)
+
+        preview_limit = preview_length if preview_length is not None else 200
+
+        for element in elements:
+            element_data = await element.evaluate(
+                "el => ({\n                    tagName: el.tagName,\n                    role: el.getAttribute('role'),\n                    textContent: el.textContent,\n                    attributes: Array.from(el.attributes).reduce((acc, attr) => { acc[attr.name] = attr.value; return acc; }, {})\n                })"
+            )
+
+            raw_text = element_data.get("textContent") or ""
+            if preview_limit <= 0:
+                text_preview = ""
+                text_truncated = len(raw_text) > 0
+            else:
+                text_preview, text_truncated = _truncate_text(
+                    raw_text, preview_limit
+                )
+
+            raw_attributes = element_data.get("attributes") or {}
+            filtered_attributes = {
+                key: value
+                for key, value in raw_attributes.items()
+                if key in META_ATTRIBUTE_KEYS and value is not None
+            }
+
+            if element_data.get("role") and "role" not in filtered_attributes:
+                filtered_attributes["role"] = element_data["role"]
+
+            element_info = {
+                "tag_name": element_data.get("tagName"),
+                "role": element_data.get("role"),
+                "text_preview": text_preview,
+                "attributes": filtered_attributes,
+                "preview_length": preview_limit,
+            }
+
+            if text_truncated:
+                element_info["text_truncated"] = True
+                any_truncated = True
+
+            elements_info.append(element_info)
+
+        return ElementMetaResult(
+            found=total_count > 0,
+            count=total_count,
+            returned_count=len(elements_info),
+            elements=elements_info,
+            truncated=any_truncated,
+        )
+    except Exception as e:
+        return ElementMetaResult(found=False, count=0, error=str(e))
+
+
 # Snapshotting Tools
 @mcp.tool()
 async def get_html(ctx: Context) -> Dict[str, Any]:
@@ -1176,7 +1301,12 @@ async def get_html(ctx: Context) -> Dict[str, Any]:
 
 
 @mcp.tool()
-async def get_accessibility_snapshot(ctx: Context) -> Dict[str, Any]:
+async def get_accessibility_snapshot(
+    ctx: Context,
+    interesting_only: bool = True,
+    root_selector: Optional[str] = None,
+    max_nodes: Optional[int] = None,
+) -> Dict[str, Any]:
     """Capture the accessibility tree structure of the current page.
 
     This tool returns the accessibility tree used by screen readers and other
@@ -1184,26 +1314,49 @@ async def get_accessibility_snapshot(ctx: Context) -> Dict[str, Any]:
 
     Args:
         ctx: MCP context containing the browser state
+        interesting_only: Whether to return only nodes Playwright deems interesting (default True)
+        root_selector: Optional selector to scope the snapshot to a specific subtree
+        max_nodes: Optional override for the node cap applied to the returned snapshot (<=0 disables)
 
     Returns:
         Dict with success status and the accessibility tree snapshot structure
     """
     try:
         page = get_current_page(ctx)
-        snapshot = await page.accessibility.snapshot()
+
+        root_element = None
+        if root_selector:
+            root_element = await page.query_selector(root_selector)
+            if root_element is None:
+                return {
+                    "success": False,
+                    "error": "Root selector not found",
+                    "selector": root_selector,
+                }
+
+        snapshot = await page.accessibility.snapshot(
+            interesting_only=interesting_only,
+            root=root_element,
+        )
+
+        node_limit = _resolve_limit(config.max_accessibility_nodes, max_nodes)
         pruned_snapshot, truncated, node_count = _prune_accessibility_snapshot(
-            snapshot, config.max_accessibility_nodes
+            snapshot, node_limit
         )
 
         result: Dict[str, Any] = {
             "success": True,
             "snapshot": pruned_snapshot,
             "node_count": node_count,
+            "interesting_only": interesting_only,
         }
+
+        if root_selector:
+            result["root_selector"] = root_selector
 
         if truncated:
             result["truncated"] = True
-            result["max_nodes"] = config.max_accessibility_nodes
+            result["max_nodes"] = node_limit
 
         return result
     except Exception as e:
