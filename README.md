@@ -10,6 +10,7 @@ A minimal, robust Playwright MCP (Model Context Protocol) server that exposes co
 - **DOM Interaction**: Click, type, fill, select, hover, scroll using Playwright selectors
 - **Element Discovery**: Query elements using CSS, XPath, role, text, and other Playwright locators
 - **Snapshotting**: Get HTML, accessibility snapshots, screenshots, and PDFs
+- **Token-Aware Outputs**: Configurable caps keep element queries and accessibility snapshots within safe sizes for LLM consumption
 - **Script Evaluation**: Run JavaScript in the page context
 - **Network Monitoring**: Capture and analyze all network requests and responses
 - **Network Interception**: Block, modify, or mock network requests
@@ -149,6 +150,7 @@ uv run mcp dev src/playwright_mcp/server.py
 #### Element Discovery & Validation
 - `query_selector(selector: str)` - Query for single element
 - `query_selector_all(selector: str)` - Query for all matching elements
+- Both element query tools obey the configured output caps and return `truncated` / `returned_count` metadata when results are clipped.
 - `is_visible(selector: str)` - Check if element is visible
 - `is_enabled(selector: str)` - Check if element is enabled
 - `wait_for_element(selector: str, timeout: int)` - Wait for element to appear
@@ -159,6 +161,7 @@ uv run mcp dev src/playwright_mcp/server.py
 #### Content & Snapshots
 - `get_html()` - Get page HTML
 - `get_accessibility_snapshot()` - Get accessibility tree
+- Accessibility snapshots are pruned to the configured node budget and include `truncated`, `max_nodes`, and `node_count` metadata.
 - `screenshot(selector: str, full_page: bool)` - Take screenshot of page or element
 - `pdf()` - Generate PDF of page
 
@@ -227,6 +230,11 @@ The server accepts the following configuration options:
 - `--user-data-dir` - Path to browser profile directory for persistent context
 - `--port` - Port for HTTP transport
 - `--timeout` - Default timeout for operations (ms)
+- `--max-elements` - Maximum number of DOM nodes returned by query tools (default: 20)
+- `--max-element-text-length` - Maximum characters returned for element text and attribute values (default: 2000)
+- `--max-accessibility-nodes` - Maximum accessibility tree nodes returned by `get_accessibility_snapshot` (default: 500)
+
+All caps accept `0` or negative values to disable truncation entirely. When truncation occurs, tool responses include `truncated` flags and metadata so clients can optionally re-issue a narrower request.
 
 ### Real Chrome vs Bundled Chromium
 

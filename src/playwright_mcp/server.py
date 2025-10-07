@@ -8,7 +8,7 @@ import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 from urllib.parse import urlparse, parse_qs
 
 from mcp.server.fastmcp import Context, FastMCP
@@ -90,6 +90,8 @@ class ElementQueryResult(BaseModel):
     found: bool
     count: int
     elements: List[Dict[str, Any]] = Field(default_factory=list)
+    truncated: bool = False
+    returned_count: Optional[int] = None
     error: Optional[str] = None
 
 
@@ -205,6 +207,9 @@ class Config:
         viewport_height: int = 1080,
         channel: Optional[str] = None,
         user_data_dir: Optional[str] = None,
+        max_elements_returned: int = 20,
+        max_element_text_length: int = 2000,
+        max_accessibility_nodes: int = 500,
     ):
         self.headless = headless
         self.browser_type = browser_type
@@ -213,6 +218,9 @@ class Config:
         self.viewport_height = viewport_height
         self.channel = channel
         self.user_data_dir = user_data_dir
+        self.max_elements_returned = max_elements_returned
+        self.max_element_text_length = max_element_text_length
+        self.max_accessibility_nodes = max_accessibility_nodes
 
 
 # Global configuration
@@ -417,6 +425,85 @@ def get_current_page(ctx: Context) -> Page:
     """Get the current active page from context."""
     browser_state = get_browser_state(ctx)
     return browser_state.get_current_page()
+
+
+def _truncate_text(value: Optional[str], max_length: int) -> Tuple[Optional[str], bool]:
+    """Truncate string values according to configured limit."""
+    if value is None:
+        return None, False
+    if max_length <= 0 or len(value) <= max_length:
+        return value, False
+    return value[:max_length], True
+
+
+def _truncate_attributes(
+    attributes: Dict[str, Any], max_length: int
+) -> Tuple[Dict[str, Any], bool]:
+    """Apply text truncation to string attribute values."""
+    truncated = False
+    limited: Dict[str, Any] = {}
+    for key, attr_value in attributes.items():
+        if isinstance(attr_value, str):
+            limited_value, was_truncated = _truncate_text(attr_value, max_length)
+            truncated = truncated or was_truncated
+            limited[key] = limited_value
+        else:
+            limited[key] = attr_value
+    return limited, truncated
+
+
+def _count_accessibility_nodes(node: Optional[Dict[str, Any]]) -> int:
+    if not node:
+        return 0
+    total = 0
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        total += 1
+        children = current.get("children") or []
+        stack.extend(children)
+    return total
+
+
+def _prune_accessibility_snapshot(
+    snapshot: Optional[Dict[str, Any]], max_nodes: int
+) -> Tuple[Optional[Dict[str, Any]], bool, int]:
+    if snapshot is None:
+        return None, False, 0
+    if max_nodes <= 0:
+        return snapshot, False, _count_accessibility_nodes(snapshot)
+
+    included = 0
+    truncated = False
+
+    def prune(node: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        nonlocal included, truncated
+        if included >= max_nodes:
+            truncated = True
+            return None
+
+        node_copy = dict(node)
+        included += 1
+
+        children = node_copy.get("children") or []
+        if children:
+            pruned_children = []
+            for child in children:
+                if included >= max_nodes:
+                    truncated = True
+                    break
+                pruned_child = prune(child)
+                if pruned_child is not None:
+                    pruned_children.append(pruned_child)
+            if pruned_children:
+                node_copy["children"] = pruned_children
+            else:
+                node_copy.pop("children", None)
+
+        return node_copy
+
+    pruned_snapshot = prune(snapshot)
+    return pruned_snapshot, truncated, included
 
 
 # Navigation Tools
@@ -968,13 +1055,31 @@ async def query_selector(selector: str, ctx: Context) -> ElementQueryResult:
                 "el => Object.fromEntries(Array.from(el.attributes).map(attr => [attr.name, attr.value]))"
             )
 
-            element_info = {
+            text_content, text_truncated = _truncate_text(
+                text_content, config.max_element_text_length
+            )
+            attributes, attributes_truncated = _truncate_attributes(
+                attributes, config.max_element_text_length
+            )
+
+            element_info: Dict[str, Any] = {
                 "tag_name": tag_name,
                 "text_content": text_content,
                 "attributes": attributes,
             }
 
-            return ElementQueryResult(found=True, count=1, elements=[element_info])
+            if text_truncated:
+                element_info["text_truncated"] = True
+            if attributes_truncated:
+                element_info["attributes_truncated"] = True
+
+            return ElementQueryResult(
+                found=True,
+                count=1,
+                returned_count=1,
+                truncated=text_truncated or attributes_truncated,
+                elements=[element_info],
+            )
         else:
             return ElementQueryResult(found=False, count=0)
     except Exception as e:
@@ -999,7 +1104,14 @@ async def query_selector_all(selector: str, ctx: Context) -> ElementQueryResult:
         page = get_current_page(ctx)
         elements = await page.query_selector_all(selector)
 
+        total_count = len(elements)
+        max_elements = config.max_elements_returned
+        if max_elements > 0:
+            elements = elements[:max_elements]
+
         elements_info = []
+        any_truncated = total_count > len(elements)
+
         for element in elements:
             tag_name = await element.evaluate("el => el.tagName")
             text_content = await element.evaluate("el => el.textContent")
@@ -1007,16 +1119,35 @@ async def query_selector_all(selector: str, ctx: Context) -> ElementQueryResult:
                 "el => Object.fromEntries(Array.from(el.attributes).map(attr => [attr.name, attr.value]))"
             )
 
-            elements_info.append(
-                {
-                    "tag_name": tag_name,
-                    "text_content": text_content,
-                    "attributes": attributes,
-                }
+            text_content, text_truncated = _truncate_text(
+                text_content, config.max_element_text_length
+            )
+            attributes, attributes_truncated = _truncate_attributes(
+                attributes, config.max_element_text_length
             )
 
+            if text_truncated or attributes_truncated:
+                any_truncated = True
+
+            element_info: Dict[str, Any] = {
+                "tag_name": tag_name,
+                "text_content": text_content,
+                "attributes": attributes,
+            }
+
+            if text_truncated:
+                element_info["text_truncated"] = True
+            if attributes_truncated:
+                element_info["attributes_truncated"] = True
+
+            elements_info.append(element_info)
+
         return ElementQueryResult(
-            found=len(elements) > 0, count=len(elements), elements=elements_info
+            found=total_count > 0,
+            count=total_count,
+            returned_count=len(elements_info),
+            elements=elements_info,
+            truncated=any_truncated,
         )
     except Exception as e:
         return ElementQueryResult(found=False, count=0, error=str(e))
@@ -1060,7 +1191,21 @@ async def get_accessibility_snapshot(ctx: Context) -> Dict[str, Any]:
     try:
         page = get_current_page(ctx)
         snapshot = await page.accessibility.snapshot()
-        return {"success": True, "snapshot": snapshot}
+        pruned_snapshot, truncated, node_count = _prune_accessibility_snapshot(
+            snapshot, config.max_accessibility_nodes
+        )
+
+        result: Dict[str, Any] = {
+            "success": True,
+            "snapshot": pruned_snapshot,
+            "node_count": node_count,
+        }
+
+        if truncated:
+            result["truncated"] = True
+            result["max_nodes"] = config.max_accessibility_nodes
+
+        return result
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -2235,6 +2380,24 @@ def main():
         type=str,
         help="Path to Chrome user data directory (enables persistent context with your profile)",
     )
+    parser.add_argument(
+        "--max-elements",
+        type=int,
+        default=config.max_elements_returned,
+        help="Maximum number of elements returned by query selector tools (<=0 disables)",
+    )
+    parser.add_argument(
+        "--max-element-text-length",
+        type=int,
+        default=config.max_element_text_length,
+        help="Maximum characters returned for element text/attributes (<=0 disables)",
+    )
+    parser.add_argument(
+        "--max-accessibility-nodes",
+        type=int,
+        default=config.max_accessibility_nodes,
+        help="Maximum nodes included in accessibility snapshots (<=0 disables)",
+    )
 
     args = parser.parse_args()
 
@@ -2244,6 +2407,9 @@ def main():
     config.timeout = args.timeout
     config.channel = args.channel
     config.user_data_dir = getattr(args, "user_data_dir", None)
+    config.max_elements_returned = args.max_elements
+    config.max_element_text_length = args.max_element_text_length
+    config.max_accessibility_nodes = args.max_accessibility_nodes
 
     # Setup logging
     logging.basicConfig(level=logging.INFO)
