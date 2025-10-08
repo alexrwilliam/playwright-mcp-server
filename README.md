@@ -11,6 +11,7 @@ A minimal, robust Playwright MCP (Model Context Protocol) server that exposes co
 - **Element Discovery**: Query elements using CSS, XPath, role, text, and other Playwright locators
 - **Snapshotting**: Get HTML, accessibility snapshots, screenshots, and PDFs
 - **Token-Aware Outputs**: Configurable caps keep element queries and accessibility snapshots within safe sizes for LLM consumption
+- **Overflow Artifacts**: Large responses are trimmed automatically with previews plus file references you can reopen on demand via the `read_artifact` tool
 - **Script Evaluation**: Run JavaScript in the page context
 - **Network Monitoring**: Capture and analyze all network requests and responses
 - **Network Interception**: Block, modify, or mock network requests
@@ -84,6 +85,12 @@ playwright-mcp stdio --channel chrome
 # Use real Chrome with your profile (cookies, extensions, history)
 playwright-mcp stdio --channel chrome --user-data-dir "/Users/you/Library/Application Support/Google/Chrome"
 
+# Adjust response budgets (defaults: 4k inline, 400-char previews)
+playwright-mcp stdio --max-response-chars 6000 --preview-chars 600
+
+# Choose where overflow artifacts are written
+playwright-mcp stdio --artifact-dir /tmp/playwright-artifacts
+
 # Other Chrome channels
 playwright-mcp stdio --channel chrome-beta
 playwright-mcp stdio --channel chrome-dev
@@ -110,6 +117,17 @@ Add to your `claude_desktop_config.json`:
 # Install and run MCP inspector
 uv run mcp dev src/playwright_mcp/server.py
 ```
+
+### Response Budgeting & Artifacts
+
+High-volume tools (`evaluate`, `get_accessibility_snapshot`, `get_network_requests`, `get_network_responses`, and future additions) now honor a shared response budget. When the serialized payload would exceed `--max-response-chars`:
+
+- The inline result is trimmed to fit the budget and marked with `truncated: true`.
+- A compact `preview` (default 400 chars) snapshots what was retained.
+- The full payload is written to the artifact directory (default `tmp/playwright_mcp`) and returned as `overflow_path` plus the original size in `overflow_characters`.
+- Use the `read_artifact` tool (or open the file locally) to retrieve the saved payload. Artifacts that are binary fall back to base64 when read.
+
+Tweak the caps per run with `--max-response-chars`, `--preview-chars`, and `--artifact-dir` or override per-call limits where a tool exposes them.
 
 ## API Reference
 
@@ -158,6 +176,14 @@ uv run mcp dev src/playwright_mcp/server.py
 - `get_element_bounding_box(selector: str)` - Get element position and size
 - `get_element_attributes(selector: str)` - Get all element attributes
 - `get_computed_style(selector: str, property: str)` - Get CSS computed style
+
+#### Script Evaluation & Diagnostics
+- `evaluate(script: str)` - Execute JavaScript in page context (results respect the shared response budget and emit overflow metadata as needed)
+
+#### Network Monitoring & Overflow Retrieval
+- `get_network_requests(url_pattern: str | None = None)` - Inspect captured requests; large result sets spill to artifacts with previews
+- `get_network_responses(url_pattern: str | None = None)` - Inspect captured responses with the same budgeting behaviour
+- `read_artifact(path: str)` - Load an overflow artifact referenced in a previous response (returns text or base64 content)
 
 #### Content & Snapshots
 - `get_html()` - Get page HTML
@@ -234,6 +260,9 @@ The server accepts the following configuration options:
 - `--max-elements` - Maximum number of DOM nodes returned by query tools (default: 20)
 - `--max-element-text-length` - Maximum characters returned for element text and attribute values (default: 2000)
 - `--max-accessibility-nodes` - Maximum accessibility tree nodes returned by `get_accessibility_snapshot` (default: 500)
+- `--max-response-chars` - Maximum serialized characters returned inline before results spill to artifact files (default: 4000)
+- `--preview-chars` - Maximum characters included in inline previews when truncation occurs (default: 400)
+- `--artifact-dir` - Directory where overflow artifacts are written (default: `./tmp/playwright_mcp`)
 
 All caps accept `0` or negative values to disable truncation entirely. When truncation occurs, tool responses include `truncated` flags and metadata so clients can optionally re-issue a narrower request.
 

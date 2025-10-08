@@ -5,9 +5,12 @@ import base64
 import json
 import logging
 import sys
+import time
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 from urllib.parse import urlparse, parse_qs
 
@@ -129,6 +132,10 @@ class ScriptResult(BaseModel):
     success: bool
     result: Optional[Any] = None
     error: Optional[str] = None
+    truncated: Optional[bool] = None
+    preview: Optional[str] = None
+    overflow_path: Optional[str] = None
+    overflow_characters: Optional[int] = None
 
 
 class NetworkRequestResult(BaseModel):
@@ -221,6 +228,9 @@ class Config:
         max_elements_returned: int = 20,
         max_element_text_length: int = 2000,
         max_accessibility_nodes: int = 500,
+        max_response_characters: int = 4000,
+        preview_characters: int = 400,
+        artifact_directory: Optional[str] = None,
     ):
         self.headless = headless
         self.browser_type = browser_type
@@ -232,6 +242,13 @@ class Config:
         self.max_elements_returned = max_elements_returned
         self.max_element_text_length = max_element_text_length
         self.max_accessibility_nodes = max_accessibility_nodes
+        self.max_response_characters = max_response_characters
+        self.preview_characters = preview_characters
+        if artifact_directory:
+            self.artifact_directory = Path(artifact_directory).expanduser()
+        else:
+            self.artifact_directory = (Path.cwd() / "tmp" / "playwright_mcp").expanduser()
+        self.artifact_directory = self.artifact_directory.absolute()
 
 
 # Global configuration
@@ -359,8 +376,6 @@ mcp = FastMCP("Playwright MCP Server", lifespan=browser_lifespan)
 
 async def _setup_page_tracking(state: BrowserState):
     """Set up page tracking for new tabs and popups."""
-    import uuid
-
     async def handle_new_page(page: Page):
         """Handle new page/tab creation."""
         try:
@@ -386,8 +401,6 @@ async def _setup_page_tracking(state: BrowserState):
 
 async def _setup_network_monitoring_for_page(state: BrowserState, page: Page):
     """Set up network monitoring for a specific page."""
-    import time
-
     async def handle_request(request: Request):
         """Capture request details."""
         try:
@@ -522,6 +535,144 @@ def _resolve_limit(default_value: int, override: Optional[int]) -> int:
         return default_value
     return override
 
+
+def _ensure_artifact_dir() -> Path:
+    """Ensure the artifact directory exists and return it."""
+    directory = config.artifact_directory
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        logger.error("Unable to create artifact directory %s: %s", directory, exc)
+    return directory
+
+
+def _make_artifact_path(label: str) -> Path:
+    """Create a unique artifact file path for overflow payloads."""
+    timestamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
+    safe_label = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in label.lower())
+    safe_label = safe_label[:64] or "payload"
+    filename = f"{timestamp}_{safe_label}_{uuid.uuid4().hex}.json"
+    return _ensure_artifact_dir() / filename
+
+
+def _serialize_preview(value: Any, max_chars: int) -> str:
+    """Return a string preview of a value limited to ``max_chars``."""
+    if max_chars <= 0:
+        return ""
+    try:
+        serialized = json.dumps(value, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        serialized = str(value)
+    if len(serialized) <= max_chars:
+        return serialized
+    return serialized[:max_chars]
+
+
+def _estimate_size(value: Any) -> int:
+    """Estimate the serialized size of the value in characters."""
+    try:
+        return len(json.dumps(value, ensure_ascii=False, default=str))
+    except (TypeError, ValueError):
+        return len(str(value))
+
+
+def _empty_like(value: Any) -> Any:
+    """Return an empty placeholder of the same container type."""
+    if isinstance(value, list):
+        return []
+    if isinstance(value, dict):
+        return {}
+    if isinstance(value, str):
+        return ""
+    return None
+
+
+def _shrink_value(value: Any, budget: int) -> Tuple[Any, bool]:
+    """Shrink the value so that its serialized representation fits within ``budget`` characters."""
+    if budget <= 0:
+        return _empty_like(value), True
+
+    if isinstance(value, str):
+        if len(value) <= budget:
+            return value, False
+        return value[:budget], True
+
+    if isinstance(value, list):
+        truncated = False
+        reduced: List[Any] = []
+        for item in value:
+            current_size = _estimate_size(reduced)
+            remaining = max(budget - current_size - 1, 0)
+            if remaining <= 0:
+                truncated = True
+                break
+            shrunk_item, item_truncated = _shrink_value(item, remaining)
+            candidate = reduced + [shrunk_item]
+            if _estimate_size(candidate) > budget:
+                truncated = True
+                break
+            reduced.append(shrunk_item)
+            truncated = truncated or item_truncated
+        return reduced, truncated
+
+    if isinstance(value, dict):
+        truncated = False
+        reduced: Dict[Any, Any] = {}
+        for key, item in value.items():
+            current_size = _estimate_size(reduced)
+            key_overhead = _estimate_size({key: None}) - _estimate_size({})
+            remaining = max(budget - current_size - key_overhead, 0)
+            if remaining <= 0:
+                truncated = True
+                break
+            shrunk_item, item_truncated = _shrink_value(item, remaining)
+            candidate = dict(reduced)
+            candidate[key] = shrunk_item
+            if _estimate_size(candidate) > budget:
+                truncated = True
+                break
+            reduced[key] = shrunk_item
+            truncated = truncated or item_truncated
+        return reduced, truncated
+
+    return value, False
+
+
+def _apply_response_budget(
+    value: Any,
+    *,
+    budget: int,
+    preview_limit: int,
+    label: str,
+) -> Tuple[Any, bool, Optional[str], Optional[str], int]:
+    """Apply response budget constraints to the provided value."""
+
+    size = _estimate_size(value)
+    if budget <= 0 or size <= budget:
+        return value, False, None, None, size
+
+    trimmed_value, trimmed_internally = _shrink_value(value, budget)
+    # Ensure the trimmed value actually respects the budget; fallback to empty if not.
+    if _estimate_size(trimmed_value) > budget:
+        trimmed_value = _empty_like(value)
+        trimmed_internally = True
+
+    preview = _serialize_preview(trimmed_value, preview_limit)
+    artifact_path = _make_artifact_path(label)
+    serialized_value = None
+    try:
+        serialized_value = json.dumps(value, ensure_ascii=False, default=str, indent=2)
+    except (TypeError, ValueError):
+        serialized_value = str(value)
+        artifact_path = artifact_path.with_suffix(".txt")
+
+    try:
+        artifact_path.write_text(serialized_value, encoding="utf-8")
+    except Exception as exc:
+        logger.error("Failed to write overflow artifact %s: %s", artifact_path, exc)
+        artifact_path = None
+
+    return trimmed_value, True, preview, str(artifact_path) if artifact_path else None, size
 
 META_ATTRIBUTE_KEYS = {
     "id",
@@ -1340,13 +1491,26 @@ async def get_accessibility_snapshot(
         )
 
         node_limit = _resolve_limit(config.max_accessibility_nodes, max_nodes)
-        pruned_snapshot, truncated, node_count = _prune_accessibility_snapshot(
+        pruned_snapshot, node_truncated, node_count = _prune_accessibility_snapshot(
             snapshot, node_limit
+        )
+
+        (
+            budgeted_snapshot,
+            budget_truncated,
+            preview,
+            overflow_path,
+            original_size,
+        ) = _apply_response_budget(
+            pruned_snapshot,
+            budget=config.max_response_characters,
+            preview_limit=config.preview_characters,
+            label="accessibility_snapshot",
         )
 
         result: Dict[str, Any] = {
             "success": True,
-            "snapshot": pruned_snapshot,
+            "snapshot": budgeted_snapshot,
             "node_count": node_count,
             "interesting_only": interesting_only,
         }
@@ -1354,9 +1518,16 @@ async def get_accessibility_snapshot(
         if root_selector:
             result["root_selector"] = root_selector
 
-        if truncated:
+        if node_truncated:
             result["truncated"] = True
             result["max_nodes"] = node_limit
+
+        if budget_truncated:
+            result["truncated"] = True
+            result["preview"] = preview
+            if overflow_path:
+                result["overflow_path"] = overflow_path
+            result["overflow_characters"] = original_size
 
         return result
     except Exception as e:
@@ -1443,7 +1614,32 @@ async def evaluate(script: str, ctx: Context) -> ScriptResult:
     try:
         page = get_current_page(ctx)
         result = await page.evaluate(script)
-        return ScriptResult(success=True, result=result)
+        (
+            processed_result,
+            truncated,
+            preview,
+            overflow_path,
+            original_size,
+        ) = _apply_response_budget(
+            result,
+            budget=config.max_response_characters,
+            preview_limit=config.preview_characters,
+            label="evaluate_result",
+        )
+
+        payload: Dict[str, Any] = {
+            "success": True,
+            "result": processed_result,
+        }
+
+        if truncated:
+            payload["truncated"] = True
+            payload["preview"] = preview
+            if overflow_path:
+                payload["overflow_path"] = overflow_path
+            payload["overflow_characters"] = original_size
+
+        return ScriptResult(**payload)
     except Exception as e:
         return ScriptResult(success=False, error=str(e))
 
@@ -1968,7 +2164,37 @@ async def get_network_requests(
                 req for req in requests if fnmatch.fnmatch(req["url"], url_pattern)
             ]
 
-        return {"success": True, "requests": requests, "count": len(requests)}
+        total_count = len(requests)
+        (
+            clipped_requests,
+            truncated,
+            preview,
+            overflow_path,
+            original_size,
+        ) = _apply_response_budget(
+            requests,
+            budget=config.max_response_characters,
+            preview_limit=config.preview_characters,
+            label="network_requests",
+        )
+
+        result: Dict[str, Any] = {
+            "success": True,
+            "requests": clipped_requests,
+            "count": total_count,
+        }
+
+        if isinstance(clipped_requests, list):
+            result["returned_count"] = len(clipped_requests)
+
+        if truncated:
+            result["truncated"] = True
+            result["preview"] = preview
+            if overflow_path:
+                result["overflow_path"] = overflow_path
+            result["overflow_characters"] = original_size
+
+        return result
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -2000,7 +2226,37 @@ async def get_network_responses(
                 resp for resp in responses if fnmatch.fnmatch(resp["url"], url_pattern)
             ]
 
-        return {"success": True, "responses": responses, "count": len(responses)}
+        total_count = len(responses)
+        (
+            clipped_responses,
+            truncated,
+            preview,
+            overflow_path,
+            original_size,
+        ) = _apply_response_budget(
+            responses,
+            budget=config.max_response_characters,
+            preview_limit=config.preview_characters,
+            label="network_responses",
+        )
+
+        result: Dict[str, Any] = {
+            "success": True,
+            "responses": clipped_responses,
+            "count": total_count,
+        }
+
+        if isinstance(clipped_responses, list):
+            result["returned_count"] = len(clipped_responses)
+
+        if truncated:
+            result["truncated"] = True
+            result["preview"] = preview
+            if overflow_path:
+                result["overflow_path"] = overflow_path
+            result["overflow_characters"] = original_size
+
+        return result
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -2189,6 +2445,48 @@ async def get_response_body(ctx: Context, url_pattern: str) -> Dict[str, Any]:
         }
     except Exception as e:
         return {"success": False, "url_pattern": url_pattern, "error": str(e)}
+
+
+@mcp.tool()
+async def read_artifact(path: str, ctx: Context) -> Dict[str, Any]:
+    """Read an overflow artifact produced by response budgeting."""
+
+    del ctx  # Maintains consistent tool signature; context not needed here.
+
+    try:
+        resolved_path = Path(path).expanduser().absolute()
+    except Exception as exc:
+        return {"success": False, "error": f"Invalid path: {exc}"}
+
+    artifact_root = _ensure_artifact_dir().absolute()
+    try:
+        resolved_path.relative_to(artifact_root)
+    except ValueError:
+        return {
+            "success": False,
+            "error": "Path is outside of the configured artifact directory",
+        }
+
+    if not resolved_path.exists():
+        return {"success": False, "error": "Artifact not found"}
+
+    try:
+        content = resolved_path.read_text(encoding="utf-8")
+        return {"success": True, "path": str(resolved_path), "content": content}
+    except UnicodeDecodeError:
+        try:
+            data = resolved_path.read_bytes()
+        except Exception as exc:
+            return {"success": False, "error": str(exc)}
+        encoded = base64.b64encode(data).decode("utf-8")
+        return {
+            "success": True,
+            "path": str(resolved_path),
+            "content_base64": encoded,
+            "binary": True,
+        }
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
 
 
 # Cookie Management Tools
@@ -2551,6 +2849,24 @@ def main():
         default=config.max_accessibility_nodes,
         help="Maximum nodes included in accessibility snapshots (<=0 disables)",
     )
+    parser.add_argument(
+        "--max-response-chars",
+        type=int,
+        default=config.max_response_characters,
+        help="Maximum characters returned inline before saving overflow to an artifact (<=0 disables)",
+    )
+    parser.add_argument(
+        "--preview-chars",
+        type=int,
+        default=config.preview_characters,
+        help="Maximum characters included in inline previews for truncated payloads (<=0 disables)",
+    )
+    parser.add_argument(
+        "--artifact-dir",
+        type=str,
+        default=str(config.artifact_directory),
+        help="Directory where overflow artifacts are written",
+    )
 
     args = parser.parse_args()
 
@@ -2563,6 +2879,9 @@ def main():
     config.max_elements_returned = args.max_elements
     config.max_element_text_length = args.max_element_text_length
     config.max_accessibility_nodes = args.max_accessibility_nodes
+    config.max_response_characters = args.max_response_chars
+    config.preview_characters = args.preview_chars
+    config.artifact_directory = Path(args.artifact_dir).expanduser().absolute()
 
     # Setup logging
     logging.basicConfig(level=logging.INFO)
