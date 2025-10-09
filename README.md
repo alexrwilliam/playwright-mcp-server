@@ -11,7 +11,7 @@ A minimal, robust Playwright MCP (Model Context Protocol) server that exposes co
 - **Element Discovery**: Query elements using CSS, XPath, role, text, and other Playwright locators
 - **Snapshotting**: Get HTML, accessibility snapshots, screenshots, and PDFs
 - **Token-Aware Outputs**: Configurable caps keep element queries and accessibility snapshots within safe sizes for LLM consumption
-- **Overflow Artifacts**: Large responses are trimmed automatically with previews plus file references you can reopen on demand via the `read_artifact` tool
+- **Overflow Artifacts**: Large responses are trimmed automatically, auto-cleaned after ~2 hours by default, and include previews plus file references you can reopen via the `read_artifact` tool
 - **Script Evaluation**: Run JavaScript in the page context
 - **Network Monitoring**: Capture and analyze all network requests and responses
 - **Network Interception**: Block, modify, or mock network requests
@@ -126,6 +126,7 @@ High-volume tools (`evaluate`, `get_accessibility_snapshot`, `get_network_reques
 - A compact `preview` (default 400 chars) snapshots what was retained.
 - The full payload is written to the artifact directory (default `tmp/playwright_mcp`) and returned as `overflow_path` plus the original size in `overflow_characters`.
 - Use the `read_artifact` tool (or open the file locally) to retrieve the saved payload. Artifacts that are binary fall back to base64 when read.
+- Artifacts are auto-pruned—by default anything older than two hours is deleted and the directory is capped at 200 files (`--artifact-max-age-seconds`, `--artifact-max-files`).
 
 Tweak the caps per run with `--max-response-chars`, `--preview-chars`, and `--artifact-dir` or override per-call limits where a tool exposes them.
 
@@ -263,6 +264,8 @@ The server accepts the following configuration options:
 - `--max-response-chars` - Maximum serialized characters returned inline before results spill to artifact files (default: 4000)
 - `--preview-chars` - Maximum characters included in inline previews when truncation occurs (default: 400)
 - `--artifact-dir` - Directory where overflow artifacts are written (default: `./tmp/playwright_mcp`)
+- `--artifact-max-age-seconds` - Maximum age before artifacts are purged (default: 7200 seconds)
+- `--artifact-max-files` - Maximum number of artifact files kept in the directory (default: 200)
 
 All caps accept `0` or negative values to disable truncation entirely. When truncation occurs, tool responses include `truncated` flags and metadata so clients can optionally re-issue a narrower request.
 

@@ -231,6 +231,8 @@ class Config:
         max_response_characters: int = 4000,
         preview_characters: int = 400,
         artifact_directory: Optional[str] = None,
+        artifact_max_age_seconds: int = 7200,
+        artifact_max_files: int = 200,
     ):
         self.headless = headless
         self.browser_type = browser_type
@@ -249,6 +251,8 @@ class Config:
         else:
             self.artifact_directory = (Path.cwd() / "tmp" / "playwright_mcp").expanduser()
         self.artifact_directory = self.artifact_directory.absolute()
+        self.artifact_max_age_seconds = artifact_max_age_seconds
+        self.artifact_max_files = artifact_max_files
 
 
 # Global configuration
@@ -672,7 +676,56 @@ def _apply_response_budget(
         logger.error("Failed to write overflow artifact %s: %s", artifact_path, exc)
         artifact_path = None
 
+    if artifact_path:
+        _enforce_artifact_retention()
+
     return trimmed_value, True, preview, str(artifact_path) if artifact_path else None, size
+
+
+def _enforce_artifact_retention() -> None:
+    """Apply retention policy to the artifact directory."""
+
+    directory = config.artifact_directory
+    max_age = max(config.artifact_max_age_seconds, 0)
+    max_files = config.artifact_max_files
+
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        logger.error("Unable to ensure artifact directory %s: %s", directory, exc)
+        return
+
+    try:
+        files = [path for path in directory.iterdir() if path.is_file()]
+    except Exception as exc:
+        logger.error("Failed to enumerate artifact directory %s: %s", directory, exc)
+        return
+
+    now = time.time()
+
+    # Remove files older than the configured age limit
+    if max_age > 0:
+        for path in list(files):
+            try:
+                if now - path.stat().st_mtime > max_age:
+                    path.unlink(missing_ok=True)
+                    files.remove(path)
+            except Exception as exc:
+                logger.warning("Failed to remove expired artifact %s: %s", path, exc)
+
+    # Enforce maximum file count by removing oldest files first
+    if max_files and max_files > 0 and len(files) > max_files:
+        try:
+            files.sort(key=lambda p: p.stat().st_mtime)
+        except Exception as exc:
+            logger.error("Failed to sort artifacts for retention: %s", exc)
+            return
+
+        for path in files[:-max_files]:
+            try:
+                path.unlink(missing_ok=True)
+            except Exception as exc:
+                logger.warning("Failed to remove excess artifact %s: %s", path, exc)
 
 META_ATTRIBUTE_KEYS = {
     "id",
@@ -2867,6 +2920,18 @@ def main():
         default=str(config.artifact_directory),
         help="Directory where overflow artifacts are written",
     )
+    parser.add_argument(
+        "--artifact-max-age-seconds",
+        type=int,
+        default=config.artifact_max_age_seconds,
+        help="Maximum age (in seconds) before overflow artifacts are deleted (<=0 disables)",
+    )
+    parser.add_argument(
+        "--artifact-max-files",
+        type=int,
+        default=config.artifact_max_files,
+        help="Maximum number of overflow artifacts to retain (<=0 disables)",
+    )
 
     args = parser.parse_args()
 
@@ -2882,6 +2947,10 @@ def main():
     config.max_response_characters = args.max_response_chars
     config.preview_characters = args.preview_chars
     config.artifact_directory = Path(args.artifact_dir).expanduser().absolute()
+    config.artifact_max_age_seconds = max(args.artifact_max_age_seconds, 0)
+    config.artifact_max_files = args.artifact_max_files
+
+    _enforce_artifact_retention()
 
     # Setup logging
     logging.basicConfig(level=logging.INFO)
