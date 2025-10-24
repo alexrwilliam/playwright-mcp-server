@@ -11,7 +11,8 @@ A minimal, robust Playwright MCP (Model Context Protocol) server that exposes co
 - **Element Discovery**: Query elements using CSS, XPath, role, text, and other Playwright locators
 - **Snapshotting**: Get HTML, accessibility snapshots, screenshots, and PDFs
 - **Token-Aware Outputs**: Configurable caps keep element queries and accessibility snapshots within safe sizes for LLM consumption
-- **Overflow Artifacts**: Large responses are trimmed automatically, auto-cleaned after ~2 hours by default, and include previews plus file references you can reopen via the `read_artifact` tool
+- **Overflow Artifacts**: Large responses are trimmed automatically, auto-cleaned after ~2 hours by default, and include previews plus file references you can reopen via the artifact reader tools
+- **Binary-Friendly Defaults**: Screenshots, PDFs, and other large blobs are stored as artifacts with metadata previews so LLMs stay in control of context size
 - **Script Evaluation**: Run JavaScript in the page context
 - **Network Monitoring**: Capture and analyze all network requests and responses
 - **Network Interception**: Block, modify, or mock network requests
@@ -91,6 +92,9 @@ playwright-mcp stdio --max-response-chars 6000 --preview-chars 600
 # Choose where overflow artifacts are written
 playwright-mcp stdio --artifact-dir /tmp/playwright-artifacts
 
+# Control how much each artifact chunk returns inline
+playwright-mcp stdio --artifact-chunk-size 8192
+
 # Other Chrome channels
 playwright-mcp stdio --channel chrome-beta
 playwright-mcp stdio --channel chrome-dev
@@ -120,13 +124,17 @@ uv run mcp dev src/playwright_mcp/server.py
 
 ### Response Budgeting & Artifacts
 
-High-volume tools (`evaluate`, `get_accessibility_snapshot`, `get_network_requests`, `get_network_responses`, and future additions) now honor a shared response budget. When the serialized payload would exceed `--max-response-chars`:
+High-volume tools (`evaluate`, `get_accessibility_snapshot`, `get_network_requests`, `get_network_responses`, `get_html`, etc.) honor a shared response budget. When the serialized payload would exceed `--max-response-chars`:
 
 - The inline result is trimmed to fit the budget and marked with `truncated: true`.
 - A compact `preview` (default 400 chars) snapshots what was retained.
 - The full payload is written to the artifact directory (default `tmp/playwright_mcp`) and returned as `overflow_path` plus the original size in `overflow_characters`.
 - Use the `read_artifact` tool (or open the file locally) to retrieve the saved payload. Artifacts that are binary fall back to base64 when read.
 - Artifacts are auto-pruned—by default anything older than two hours is deleted and the directory is capped at 200 files (`--artifact-max-age-seconds`, `--artifact-max-files`).
+
+Binary-heavy tools (`screenshot`, `pdf`, `get_response_body` for non-text payloads) now default to artifact responses. They return metadata (size, hash, preview) plus `artifact_path`. Pass `inline=True` when you truly need the full base64 inline.
+
+When you need more than the inline preview, use `read_artifact_chunk` to stream binary/text artifacts in manageable slices (default chunk size is configurable via `--artifact-chunk-size`).
 
 Tweak the caps per run with `--max-response-chars`, `--preview-chars`, and `--artifact-dir` or override per-call limits where a tool exposes them.
 
@@ -184,14 +192,16 @@ Tweak the caps per run with `--max-response-chars`, `--preview-chars`, and `--ar
 #### Network Monitoring & Overflow Retrieval
 - `get_network_requests(url_pattern: str | None = None)` - Inspect captured requests; large result sets spill to artifacts with previews
 - `get_network_responses(url_pattern: str | None = None)` - Inspect captured responses with the same budgeting behaviour
-- `read_artifact(path: str)` - Load an overflow artifact referenced in a previous response (returns text or base64 content)
+- `read_artifact(path: str)` - Load the first chunk of an overflow artifact referenced in a previous response (returns text or base64 content)
+- `read_artifact_chunk(path: str, offset: int = 0, limit: int | None = None)` - Stream additional artifact data in bounded chunks
+- `get_response_body(url_pattern: str)` - Fetch the latest matching response body; text is budgeted inline, binary payloads are saved to artifacts automatically
 
 #### Content & Snapshots
 - `get_html()` - Get page HTML
 - `get_accessibility_snapshot(interesting_only: bool = True, root_selector: str | None = None, max_nodes: int | None = None)` - Get accessibility tree with optional filters and per-call node caps
 - Accessibility snapshots are pruned to the configured node budget, accept per-call overrides, and include `truncated`, `max_nodes`, and `node_count` metadata.
-- `screenshot(selector: str, full_page: bool)` - Take screenshot of page or element
-- `pdf()` - Generate PDF of page
+- `screenshot(selector: str | None = None, full_page: bool = False, inline: bool = False)` - Capture page or element; stores the PNG as an artifact with metadata previews by default
+- `pdf(inline: bool = False)` - Generate a PDF and return artifact metadata unless inline mode is explicitly requested
 
 #### JavaScript & Debugging
 - `evaluate(script: str)` - Execute JavaScript in page context
@@ -266,6 +276,7 @@ The server accepts the following configuration options:
 - `--artifact-dir` - Directory where overflow artifacts are written (default: `./tmp/playwright_mcp`)
 - `--artifact-max-age-seconds` - Maximum age before artifacts are purged (default: 7200 seconds)
 - `--artifact-max-files` - Maximum number of artifact files kept in the directory (default: 200)
+- `--artifact-chunk-size` - Default number of bytes returned per `read_artifact_chunk` call (default: 4096)
 
 All caps accept `0` or negative values to disable truncation entirely. When truncation occurs, tool responses include `truncated` flags and metadata so clients can optionally re-issue a narrower request.
 

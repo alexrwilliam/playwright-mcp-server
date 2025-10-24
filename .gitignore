@@ -177,6 +177,9 @@ Thumbs.db
 /playwright-report/
 /playwright/.cache/
 
+# MCP overflow artifacts
+tmp/
+
 # Virtual environment
 venv/
 env/

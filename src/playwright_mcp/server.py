@@ -2,16 +2,19 @@
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
+import mimetypes
 import sys
 import time
 import uuid
+from collections import deque
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Deque, Dict, List, Optional, Tuple, Union
 from urllib.parse import urlparse, parse_qs
 
 from mcp.server.fastmcp import Context, FastMCP
@@ -30,6 +33,8 @@ from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
+MAX_STORED_RESPONSE_HANDLES = 500
+
 
 @dataclass
 class BrowserState:
@@ -47,6 +52,8 @@ class BrowserState:
     # Network monitoring state
     captured_requests: List[Dict[str, Any]] = None
     captured_responses: List[Dict[str, Any]] = None
+    response_handles: Dict[str, Response] = None
+    response_handle_order: Deque[str] = None
 
     def __post_init__(self):
         if self.pages is None:
@@ -55,6 +62,10 @@ class BrowserState:
             self.captured_requests = []
         if self.captured_responses is None:
             self.captured_responses = []
+        if self.response_handles is None:
+            self.response_handles = {}
+        if self.response_handle_order is None:
+            self.response_handle_order = deque()
 
     def get_current_page(self) -> Page:
         """Get the current active page."""
@@ -116,6 +127,12 @@ class ScreenshotResult(BaseModel):
     data: Optional[str] = None  # base64 encoded
     format: str = "png"
     error: Optional[str] = None
+    artifact_path: Optional[str] = None
+    byte_size: Optional[int] = None
+    sha256: Optional[str] = None
+    preview_base64: Optional[str] = None
+    dimensions: Optional[Dict[str, Union[int, float]]] = None
+    inline: bool = False
 
 
 class PDFResult(BaseModel):
@@ -124,6 +141,11 @@ class PDFResult(BaseModel):
     success: bool
     data: Optional[str] = None  # base64 encoded
     error: Optional[str] = None
+    artifact_path: Optional[str] = None
+    byte_size: Optional[int] = None
+    sha256: Optional[str] = None
+    preview_base64: Optional[str] = None
+    inline: bool = False
 
 
 class ScriptResult(BaseModel):
@@ -233,6 +255,7 @@ class Config:
         artifact_directory: Optional[str] = None,
         artifact_max_age_seconds: int = 7200,
         artifact_max_files: int = 200,
+        artifact_chunk_size: int = 4096,
     ):
         self.headless = headless
         self.browser_type = browser_type
@@ -253,6 +276,7 @@ class Config:
         self.artifact_directory = self.artifact_directory.absolute()
         self.artifact_max_age_seconds = artifact_max_age_seconds
         self.artifact_max_files = artifact_max_files
+        self.artifact_chunk_size = max(artifact_chunk_size, 256)
 
 
 # Global configuration
@@ -423,12 +447,20 @@ async def _setup_network_monitoring_for_page(state: BrowserState, page: Page):
     async def handle_response(response: Response):
         """Capture response details."""
         try:
+            handle_id = uuid.uuid4().hex
+            state.response_handles[handle_id] = response
+            state.response_handle_order.append(handle_id)
+            while len(state.response_handle_order) > MAX_STORED_RESPONSE_HANDLES:
+                old_id = state.response_handle_order.popleft()
+                state.response_handles.pop(old_id, None)
+
             response_data = {
                 "url": response.url,
                 "status": response.status,
                 "status_text": response.status_text,
                 "headers": await response.all_headers(),
                 "timestamp": time.time(),
+                "handle_id": handle_id,
             }
             state.captured_responses.append(response_data)
         except Exception as e:
@@ -550,13 +582,81 @@ def _ensure_artifact_dir() -> Path:
     return directory
 
 
-def _make_artifact_path(label: str) -> Path:
+def _make_artifact_path(label: str, suffix: str = ".json") -> Path:
     """Create a unique artifact file path for overflow payloads."""
     timestamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
     safe_label = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in label.lower())
     safe_label = safe_label[:64] or "payload"
-    filename = f"{timestamp}_{safe_label}_{uuid.uuid4().hex}.json"
+    suffix = suffix if suffix.startswith(".") else f".{suffix}"
+    filename = f"{timestamp}_{safe_label}_{uuid.uuid4().hex}{suffix}"
     return _ensure_artifact_dir() / filename
+
+
+def _resolve_artifact_path(path: str) -> Path:
+    """Resolve a path inside the artifact directory, ensuring it is safe."""
+
+    try:
+        resolved_path = Path(path).expanduser().absolute()
+    except Exception as exc:  # pragma: no cover - defensive
+        raise ValueError(f"Invalid path: {exc}") from exc
+
+    artifact_root = _ensure_artifact_dir().absolute()
+    try:
+        resolved_path.relative_to(artifact_root)
+    except ValueError as exc:
+        raise PermissionError("Path is outside of the configured artifact directory") from exc
+
+    if not resolved_path.exists():
+        raise FileNotFoundError("Artifact not found")
+
+    return resolved_path
+
+
+def _is_probably_binary(data: bytes) -> bool:
+    """Heuristic check for binary data."""
+
+    if not data:
+        return False
+    text_chars = {7, 8, 9, 10, 12, 13, 27} | set(range(0x20, 0x7F))
+    control_bytes = sum(byte not in text_chars for byte in data)
+    return control_bytes / max(len(data), 1) > 0.30
+
+
+def _guess_suffix_from_mime(content_type: str, default: str) -> str:
+    """Return a file suffix based on MIME type."""
+
+    if not content_type:
+        return default
+    guessed = mimetypes.guess_extension(content_type.split(";")[0].strip())
+    if guessed:
+        return guessed
+    if content_type.startswith("image/"):
+        return ".png"
+    if content_type.startswith("application/pdf"):
+        return ".pdf"
+    if content_type.startswith("text/") or content_type.endswith("json"):
+        return ".txt"
+    return default
+
+
+def _is_text_content(content_type: str) -> bool:
+    """Determine whether a MIME type represents text content."""
+
+    if not content_type:
+        return True
+
+    ctype = content_type.split(";")[0].strip().lower()
+    if ctype.startswith("text/"):
+        return True
+    if ctype.endswith("json") or ctype.endswith("+json"):
+        return True
+    if ctype.endswith("xml") or ctype.endswith("+xml"):
+        return True
+    return ctype in {
+        "application/javascript",
+        "application/x-javascript",
+        "application/vnd.mozilla.xul+xml",
+    }
 
 
 def _serialize_preview(value: Any, max_chars: int) -> str:
@@ -1487,8 +1587,9 @@ async def query_selector_meta(
 async def get_html(ctx: Context) -> Dict[str, Any]:
     """Retrieve the complete HTML source of the current page.
 
-    This tool returns the full HTML content including the DOCTYPE, head, and body
-    sections. Useful for analyzing page structure or saving page content.
+    This tool returns the page HTML (doctype, head, body). The payload is trimmed
+    to the configured response budget and linked to an overflow artifact when the
+    full document would exceed inline limits.
 
     Args:
         ctx: MCP context containing the browser state
@@ -1499,7 +1600,33 @@ async def get_html(ctx: Context) -> Dict[str, Any]:
     try:
         page = get_current_page(ctx)
         html = await page.content()
-        return {"success": True, "html": html}
+        (
+            budgeted_html,
+            truncated,
+            preview,
+            overflow_path,
+            original_size,
+        ) = _apply_response_budget(
+            html,
+            budget=config.max_response_characters,
+            preview_limit=config.preview_characters,
+            label="page_html",
+        )
+
+        result: Dict[str, Any] = {
+            "success": True,
+            "html": budgeted_html,
+            "original_length": len(html),
+        }
+
+        if truncated:
+            result["truncated"] = True
+            result["preview"] = preview
+            result["overflow_characters"] = original_size
+            if overflow_path:
+                result["overflow_path"] = overflow_path
+
+        return result
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -1589,62 +1716,168 @@ async def get_accessibility_snapshot(
 
 @mcp.tool()
 async def screenshot(
-    ctx: Context, selector: Optional[str] = None, full_page: bool = False
+    ctx: Context,
+    selector: Optional[str] = None,
+    full_page: bool = False,
+    inline: bool = False,
+    preview_bytes: int = 1024,
 ) -> ScreenshotResult:
     """Capture a screenshot of the page or a specific element.
 
-    This tool generates a PNG image of either the current viewport, the entire page,
-    or a specific element. The image is returned as base64-encoded data.
+    This tool captures either the viewport, the full page, or a specific element.
+    By default it stores the PNG in the artifact directory and returns metadata plus
+    a short inline preview. Set ``inline=True`` to embed the full base64 payload like
+    the legacy behaviour.
 
     Args:
         ctx: MCP context containing the browser state
         selector: Optional Playwright selector for a specific element to screenshot
         full_page: If True, captures the entire page including content below the fold
+        inline: When True, return the entire screenshot as base64 (may consume many tokens)
+        preview_bytes: Number of bytes to include in the inline preview when not in inline mode
 
     Returns:
-        ScreenshotResult with success status, base64-encoded PNG data, format, and any errors
+        ScreenshotResult with success status plus either inline base64 data or an
+        ``artifact_path`` pointing at the saved PNG.
     """
     try:
         page = get_current_page(ctx)
 
+        dimensions: Optional[Dict[str, Union[int, float]]] = None
+
         if selector:
             element = await page.query_selector(selector)
-            if element:
-                screenshot_bytes = await element.screenshot()
-            else:
+            if not element:
                 return ScreenshotResult(success=False, error="Element not found")
+            screenshot_bytes = await element.screenshot()
+            try:
+                box = await element.bounding_box()
+            except Exception:  # pragma: no cover - best effort only
+                box = None
+            if box:
+                dimensions = {"width": box.get("width"), "height": box.get("height")}
         else:
             screenshot_bytes = await page.screenshot(full_page=full_page)
+            viewport = page.viewport_size or {}
+            if viewport:
+                dimensions = {
+                    "width": viewport.get("width"),
+                    "height": viewport.get("height"),
+                }
 
-        # Encode as base64
-        screenshot_base64 = base64.b64encode(screenshot_bytes).decode("utf-8")
+        byte_size = len(screenshot_bytes)
+        sha256 = hashlib.sha256(screenshot_bytes).hexdigest()
 
-        return ScreenshotResult(success=True, data=screenshot_base64, format="png")
+        if inline:
+            screenshot_base64 = base64.b64encode(screenshot_bytes).decode("utf-8")
+            preview = (
+                screenshot_base64[: config.preview_characters]
+                if config.preview_characters > 0
+                else None
+            )
+            return ScreenshotResult(
+                success=True,
+                data=screenshot_base64,
+                format="png",
+                byte_size=byte_size,
+                sha256=sha256,
+                preview_base64=preview,
+                dimensions=dimensions,
+                inline=True,
+            )
+
+        preview_slice = screenshot_bytes[: max(0, min(preview_bytes, byte_size))]
+        preview_base64 = (
+            base64.b64encode(preview_slice).decode("utf-8")
+            if preview_slice
+            else None
+        )
+
+        artifact_path = _make_artifact_path("screenshot", suffix=".png")
+        try:
+            artifact_path.write_bytes(screenshot_bytes)
+            _enforce_artifact_retention()
+        except Exception as exc:
+            return ScreenshotResult(success=False, error=str(exc))
+
+        return ScreenshotResult(
+            success=True,
+            format="png",
+            artifact_path=str(artifact_path),
+            byte_size=byte_size,
+            sha256=sha256,
+            preview_base64=preview_base64,
+            dimensions=dimensions,
+            inline=False,
+        )
     except Exception as e:
         return ScreenshotResult(success=False, error=str(e))
 
 
 @mcp.tool()
-async def pdf(ctx: Context) -> PDFResult:
+async def pdf(
+    ctx: Context, inline: bool = False, preview_bytes: int = 2048
+) -> PDFResult:
     """Generate a PDF document from the current page.
 
-    This tool converts the current page to a PDF format, useful for saving
-    or printing web content. Only works with Chromium-based browsers.
+    This tool converts the current page to a PDF (Chromium only). By default the
+    document is saved to the artifact directory and only metadata plus a short
+    preview are returned. Set ``inline=True`` to embed the entire base64 payload
+    when absolutely necessary.
 
     Args:
         ctx: MCP context containing the browser state
+        inline: When True, return the full base64 PDF inline (large responses)
+        preview_bytes: Number of bytes to expose in the inline preview when not embedding
 
     Returns:
-        PDFResult with success status, base64-encoded PDF data, and any errors
+        PDFResult with success status and either inline data or an ``artifact_path``
+        referencing the saved PDF.
     """
     try:
         page = get_current_page(ctx)
         pdf_bytes = await page.pdf()
+        byte_size = len(pdf_bytes)
+        sha256 = hashlib.sha256(pdf_bytes).hexdigest()
 
-        # Encode as base64
-        pdf_base64 = base64.b64encode(pdf_bytes).decode("utf-8")
+        if inline:
+            pdf_base64 = base64.b64encode(pdf_bytes).decode("utf-8")
+            preview = (
+                pdf_base64[: config.preview_characters]
+                if config.preview_characters > 0
+                else None
+            )
+            return PDFResult(
+                success=True,
+                data=pdf_base64,
+                byte_size=byte_size,
+                sha256=sha256,
+                preview_base64=preview,
+                inline=True,
+            )
 
-        return PDFResult(success=True, data=pdf_base64)
+        preview_slice = pdf_bytes[: max(0, min(preview_bytes, byte_size))]
+        preview_base64 = (
+            base64.b64encode(preview_slice).decode("utf-8")
+            if preview_slice
+            else None
+        )
+
+        artifact_path = _make_artifact_path("pdf", suffix=".pdf")
+        try:
+            artifact_path.write_bytes(pdf_bytes)
+            _enforce_artifact_retention()
+        except Exception as exc:
+            return PDFResult(success=False, error=str(exc))
+
+        return PDFResult(
+            success=True,
+            artifact_path=str(artifact_path),
+            byte_size=byte_size,
+            sha256=sha256,
+            preview_base64=preview_base64,
+            inline=False,
+        )
     except Exception as e:
         return PDFResult(success=False, error=str(e))
 
@@ -2334,6 +2567,8 @@ async def clear_network_logs(ctx: Context) -> Dict[str, Any]:
 
         browser_state.captured_requests.clear()
         browser_state.captured_responses.clear()
+        browser_state.response_handles.clear()
+        browser_state.response_handle_order.clear()
 
         return {
             "success": True,
@@ -2460,8 +2695,9 @@ async def wait_for_response(
 async def get_response_body(ctx: Context, url_pattern: str) -> Dict[str, Any]:
     """Get the response body for the most recent response matching a URL pattern.
 
-    This tool retrieves the response body content for network responses,
-    useful for extracting API response data or analyzing returned content.
+    This tool retrieves network response bodies. Text payloads are trimmed with
+    the shared response budget; binary bodies are written to the artifact store
+    and returned by reference.
 
     Args:
         ctx: MCP context containing the browser state
@@ -2474,9 +2710,7 @@ async def get_response_body(ctx: Context, url_pattern: str) -> Dict[str, Any]:
         import fnmatch
 
         browser_state = get_browser_state(ctx)
-        page = get_current_page(ctx)
 
-        # Find the most recent matching response
         matching_responses = [
             resp
             for resp in reversed(browser_state.captured_responses)
@@ -2486,59 +2720,170 @@ async def get_response_body(ctx: Context, url_pattern: str) -> Dict[str, Any]:
         if not matching_responses:
             return {"success": False, "error": "No matching responses found"}
 
-        # Get the actual response object to fetch body
-        response = await page.wait_for_response(url_pattern, timeout=5000)
-        body = await response.text()
+        response_info = matching_responses[0]
+        handle_id = response_info.get("handle_id")
+        response_obj = browser_state.response_handles.get(handle_id) if handle_id else None
+
+        if response_obj is None:
+            return {
+                "success": False,
+                "error": "No live response handle available. Re-run the request before fetching the body.",
+            }
+
+        body_bytes = await response_obj.body()
+        headers = await response_obj.all_headers()
+        content_type = headers.get("content-type", "")
+        if not content_type:
+            content_type = response_info.get("headers", {}).get("content-type", "")
+
+        byte_size = len(body_bytes)
+        sha256 = hashlib.sha256(body_bytes).hexdigest()
+
+        if _is_text_content(content_type):
+            text = body_bytes.decode("utf-8", errors="replace")
+            (
+                processed_text,
+                truncated,
+                preview,
+                overflow_path,
+                original_size,
+            ) = _apply_response_budget(
+                text,
+                budget=config.max_response_characters,
+                preview_limit=config.preview_characters,
+                label="response_body",
+            )
+
+            result: Dict[str, Any] = {
+                "success": True,
+                "url": response_obj.url,
+                "body": processed_text,
+                "content_type": content_type,
+                "byte_size": byte_size,
+                "sha256": sha256,
+                "headers": headers,
+            }
+
+            if truncated:
+                result["truncated"] = True
+                result["preview"] = preview
+                result["overflow_characters"] = original_size
+                if overflow_path:
+                    result["overflow_path"] = overflow_path
+            return result
+
+        suffix = _guess_suffix_from_mime(content_type, ".bin")
+        artifact_path = _make_artifact_path("response_body", suffix=suffix)
+        try:
+            artifact_path.write_bytes(body_bytes)
+            _enforce_artifact_retention()
+        except Exception as exc:
+            return {"success": False, "error": str(exc)}
+
+        preview_slice = body_bytes[: min(byte_size, 512)]
+        preview_base64 = (
+            base64.b64encode(preview_slice).decode("utf-8") if preview_slice else None
+        )
 
         return {
             "success": True,
-            "url": response.url,
-            "body": body,
-            "content_type": response.headers.get("content-type", ""),
+            "url": response_obj.url,
+            "content_type": content_type,
+            "byte_size": byte_size,
+            "sha256": sha256,
+            "artifact_path": str(artifact_path),
+            "preview_base64": preview_base64,
+            "binary": True,
+            "headers": headers,
         }
     except Exception as e:
         return {"success": False, "url_pattern": url_pattern, "error": str(e)}
 
 
+def _read_artifact_chunk_impl(path: Path, offset: int, limit: int) -> Dict[str, Any]:
+    """Read a bounded chunk from an artifact file."""
+
+    byte_size = max(path.stat().st_size, 0)
+    start = min(max(offset, 0), byte_size)
+    chunk_size = max(limit, 1)
+
+    with path.open("rb") as handle:
+        handle.seek(start)
+        data = handle.read(chunk_size)
+
+    is_binary = _is_probably_binary(data) if data else path.suffix not in {".txt", ".json", ".log"}
+
+    payload: Dict[str, Any] = {
+        "path": str(path),
+        "offset": start,
+        "bytes_read": len(data),
+        "byte_size": byte_size,
+        "binary": bool(is_binary),
+        "next_offset": start + len(data) if start + len(data) < byte_size else None,
+    }
+
+    if not data:
+        payload["content"] = ""
+        payload["binary"] = False
+        return payload
+
+    if is_binary:
+        payload["content_base64"] = base64.b64encode(data).decode("utf-8")
+    else:
+        payload["content"] = data.decode("utf-8", errors="replace")
+
+    return payload
+
+
 @mcp.tool()
 async def read_artifact(path: str, ctx: Context) -> Dict[str, Any]:
-    """Read an overflow artifact produced by response budgeting."""
+    """Read an artifact produced by response budgeting.
+
+    The first chunk of the artifact is returned using the configured inline budget.
+    Use :func:`read_artifact_chunk` for additional data when ``truncated`` is true.
+    """
 
     del ctx  # Maintains consistent tool signature; context not needed here.
 
-    try:
-        resolved_path = Path(path).expanduser().absolute()
-    except Exception as exc:
-        return {"success": False, "error": f"Invalid path: {exc}"}
-
-    artifact_root = _ensure_artifact_dir().absolute()
-    try:
-        resolved_path.relative_to(artifact_root)
-    except ValueError:
-        return {
-            "success": False,
-            "error": "Path is outside of the configured artifact directory",
-        }
-
-    if not resolved_path.exists():
-        return {"success": False, "error": "Artifact not found"}
+    limit = config.max_response_characters
+    if limit <= 0:
+        limit = config.artifact_chunk_size
 
     try:
-        content = resolved_path.read_text(encoding="utf-8")
-        return {"success": True, "path": str(resolved_path), "content": content}
-    except UnicodeDecodeError:
-        try:
-            data = resolved_path.read_bytes()
-        except Exception as exc:
-            return {"success": False, "error": str(exc)}
-        encoded = base64.b64encode(data).decode("utf-8")
-        return {
-            "success": True,
-            "path": str(resolved_path),
-            "content_base64": encoded,
-            "binary": True,
-        }
-    except Exception as exc:
+        resolved_path = _resolve_artifact_path(path)
+        payload = _read_artifact_chunk_impl(resolved_path, offset=0, limit=limit)
+        truncated = payload.get("next_offset") is not None
+        result: Dict[str, Any] = {"success": True, **payload}
+        if truncated:
+            result["truncated"] = True
+            result["message"] = "Content truncated. Use read_artifact_chunk for additional data."
+        return result
+    except (ValueError, PermissionError, FileNotFoundError) as exc:
+        return {"success": False, "error": str(exc)}
+    except Exception as exc:  # pragma: no cover - defensive
+        return {"success": False, "error": str(exc)}
+
+
+@mcp.tool()
+async def read_artifact_chunk(
+    path: str, ctx: Context, offset: int = 0, limit: Optional[int] = None
+) -> Dict[str, Any]:
+    """Read a bounded chunk from an artifact file.
+
+    Returns decoded text when the bytes look textual, otherwise base64 payloads so
+    binary content stays compact. ``next_offset`` indicates where to resume.
+    """
+
+    del ctx  # Tool does not need the browser context.
+
+    try:
+        resolved_path = _resolve_artifact_path(path)
+        chunk_limit = limit if limit and limit > 0 else config.artifact_chunk_size
+        payload = _read_artifact_chunk_impl(resolved_path, offset=offset, limit=chunk_limit)
+        return {"success": True, **payload}
+    except (ValueError, PermissionError, FileNotFoundError) as exc:
+        return {"success": False, "error": str(exc)}
+    except Exception as exc:  # pragma: no cover - defensive
         return {"success": False, "error": str(exc)}
 
 
@@ -2932,6 +3277,12 @@ def main():
         default=config.artifact_max_files,
         help="Maximum number of overflow artifacts to retain (<=0 disables)",
     )
+    parser.add_argument(
+        "--artifact-chunk-size",
+        type=int,
+        default=config.artifact_chunk_size,
+        help="Default number of bytes returned by artifact chunk reads",
+    )
 
     args = parser.parse_args()
 
@@ -2949,6 +3300,7 @@ def main():
     config.artifact_directory = Path(args.artifact_dir).expanduser().absolute()
     config.artifact_max_age_seconds = max(args.artifact_max_age_seconds, 0)
     config.artifact_max_files = args.artifact_max_files
+    config.artifact_chunk_size = max(args.artifact_chunk_size, 256)
 
     _enforce_artifact_retention()
 
