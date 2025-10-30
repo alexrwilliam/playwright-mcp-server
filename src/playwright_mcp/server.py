@@ -1,6 +1,8 @@
 """Playwright MCP Server - Main server implementation."""
 
 import asyncio
+import os
+import secrets
 import base64
 import hashlib
 import json
@@ -269,6 +271,7 @@ class Config:
         self.max_accessibility_nodes = max_accessibility_nodes
         self.max_response_characters = max_response_characters
         self.preview_characters = preview_characters
+        # Base artifact directory; a per-session subdirectory is created at runtime.
         if artifact_directory:
             self.artifact_directory = Path(artifact_directory).expanduser()
         else:
@@ -281,6 +284,49 @@ class Config:
 
 # Global configuration
 config = Config()
+
+
+def _compute_session_id() -> str:
+    """Compute a best-effort unique session identifier.
+
+    We prefer terminal-provided session hints when available (to keep stability per tab),
+    and add process/timestamp/randomness to guarantee uniqueness across concurrent runs.
+    """
+    hints: list[str] = []
+    for var in (
+        "MCP_SESSION_ID",  # explicit override if provided
+        "CODEX_SESSION_ID",
+        "ITERM_SESSION_ID",
+        "TERM_SESSION_ID",
+        "TMUX_PANE",
+        "SSH_TTY",
+    ):
+        val = os.getenv(var)
+        if val:
+            hints.append(val)
+    try:
+        if sys.stdin and sys.stdin.isatty():
+            # TTY device path is fairly unique per terminal tab
+            hints.append(os.ttyname(sys.stdin.fileno()))
+    except Exception:  # pragma: no cover - defensive
+        pass
+
+    # Always salt with pid + coarse time + small random to avoid collisions
+    hints.extend([
+        f"pid:{os.getpid()}",
+        f"t:{int(time.time()*1000)}",
+        f"r:{secrets.token_hex(4)}",
+    ])
+
+    basis = "|".join(hints)
+    return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
+
+
+def _session_artifact_dir(base: Path) -> Path:
+    """Return the per-session artifact directory under a given base."""
+    sid = _compute_session_id()
+    # Use a stable subfolder to group sessions, keeping base tidy
+    return (base / "sessions" / sid).absolute()
 
 
 @asynccontextmanager
@@ -3263,7 +3309,10 @@ def main():
         "--artifact-dir",
         type=str,
         default=str(config.artifact_directory),
-        help="Directory where overflow artifacts are written",
+        help=(
+            "Artifact root directory. A per-session subdirectory is created "
+            "automatically to avoid collisions between concurrent Codex/MCP runs"
+        ),
     )
     parser.add_argument(
         "--artifact-max-age-seconds",
@@ -3297,15 +3346,22 @@ def main():
     config.max_accessibility_nodes = args.max_accessibility_nodes
     config.max_response_characters = args.max_response_chars
     config.preview_characters = args.preview_chars
-    config.artifact_directory = Path(args.artifact_dir).expanduser().absolute()
+    # Compute per-session artifact directory under the provided base/root.
+    artifact_base = Path(args.artifact_dir).expanduser().absolute()
+    session_dir = _session_artifact_dir(artifact_base)
+    config.artifact_directory = session_dir
     config.artifact_max_age_seconds = max(args.artifact_max_age_seconds, 0)
     config.artifact_max_files = args.artifact_max_files
     config.artifact_chunk_size = max(args.artifact_chunk_size, 256)
 
+    # Setup logging before emitting any log lines
+    logging.basicConfig(level=logging.INFO)
+
+    # Ensure the session directory exists and apply retention within the session only.
     _enforce_artifact_retention()
 
-    # Setup logging
-    logging.basicConfig(level=logging.INFO)
+    logger.info("Artifact base: %s", str(artifact_base))
+    logger.info("Using per-session artifact dir: %s", str(config.artifact_directory))
 
     # Run the server using FastMCP's run method with transport
     if args.transport == "stdio":
