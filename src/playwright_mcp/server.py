@@ -4,6 +4,7 @@ import asyncio
 import os
 import secrets
 import base64
+import shutil
 import hashlib
 import json
 import logging
@@ -327,6 +328,39 @@ def _session_artifact_dir(base: Path) -> Path:
     sid = _compute_session_id()
     # Use a stable subfolder to group sessions, keeping base tidy
     return (base / "sessions" / sid).absolute()
+
+
+def _enforce_session_retention(artifact_base: Path) -> None:
+    """Prune old per-session artifact directories under the base root.
+
+    Uses the same age limit as file retention (config.artifact_max_age_seconds).
+    If set to 0 or negative, session pruning is disabled.
+    """
+    max_age = max(config.artifact_max_age_seconds, 0)
+    if max_age <= 0:
+        return
+
+    sessions_root = (artifact_base / "sessions").expanduser().absolute()
+    try:
+        sessions_root.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        logger.warning("Unable to ensure sessions root %s: %s", sessions_root, exc)
+        return
+
+    try:
+        entries = [p for p in sessions_root.iterdir() if p.is_dir()]
+    except Exception as exc:
+        logger.warning("Failed to enumerate sessions in %s: %s", sessions_root, exc)
+        return
+
+    now = time.time()
+    for path in entries:
+        try:
+            age = now - path.stat().st_mtime
+            if age > max_age:
+                shutil.rmtree(path, ignore_errors=True)
+        except Exception as exc:
+            logger.debug("Failed to remove old session %s: %s", path, exc)
 
 
 @asynccontextmanager
@@ -3359,6 +3393,8 @@ def main():
 
     # Ensure the session directory exists and apply retention within the session only.
     _enforce_artifact_retention()
+    # Prune old session directories across all sessions at startup (TTL-based).
+    _enforce_session_retention(artifact_base)
 
     logger.info("Artifact base: %s", str(artifact_base))
     logger.info("Using per-session artifact dir: %s", str(config.artifact_directory))
