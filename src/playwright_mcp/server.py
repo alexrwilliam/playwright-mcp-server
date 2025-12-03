@@ -285,6 +285,118 @@ class Config:
 
 # Global configuration
 config = Config()
+_restart_lock = asyncio.Lock()
+
+
+async def _shutdown_browser_state(state: Optional[BrowserState]):
+    """Close browser/context and stop Playwright for a given state."""
+    if not state:
+        return
+
+    try:
+        if state.context:
+            await state.context.close()
+        elif state.browser:
+            await state.browser.close()
+    except Exception as exc:
+        logger.error("Error closing browser: %s", exc)
+
+    try:
+        if state.playwright:
+            await state.playwright.stop()
+    except Exception as exc:
+        logger.error("Error stopping playwright: %s", exc)
+
+
+async def _create_browser_state() -> BrowserState:
+    """Launch Playwright and return an initialized BrowserState based on config."""
+    playwright = await async_playwright().start()
+
+    use_persistent_context = config.user_data_dir is not None
+    browser = None
+    context = None
+
+    try:
+        if use_persistent_context:
+            launch_options = {
+                "headless": config.headless,
+                "viewport": {
+                    "width": config.viewport_width,
+                    "height": config.viewport_height,
+                },
+            }
+
+            if config.channel:
+                launch_options["channel"] = config.channel
+
+            if config.browser_type == "chromium":
+                context = await playwright.chromium.launch_persistent_context(
+                    config.user_data_dir, **launch_options
+                )
+            elif config.browser_type == "firefox":
+                context = await playwright.firefox.launch_persistent_context(
+                    config.user_data_dir, **launch_options
+                )
+            elif config.browser_type == "webkit":
+                context = await playwright.webkit.launch_persistent_context(
+                    config.user_data_dir, **launch_options
+                )
+            else:
+                raise ValueError(f"Unsupported browser type: {config.browser_type}")
+
+            browser = context.browser
+            page = context.pages[0] if context.pages else await context.new_page()
+        else:
+            launch_options = {"headless": config.headless}
+            if config.channel:
+                launch_options["channel"] = config.channel
+
+            if config.browser_type == "chromium":
+                browser = await playwright.chromium.launch(**launch_options)
+            elif config.browser_type == "firefox":
+                browser = await playwright.firefox.launch(**launch_options)
+            elif config.browser_type == "webkit":
+                browser = await playwright.webkit.launch(**launch_options)
+            else:
+                raise ValueError(f"Unsupported browser type: {config.browser_type}")
+
+            context = await browser.new_context(
+                viewport={
+                    "width": config.viewport_width,
+                    "height": config.viewport_height,
+                }
+            )
+            page = await context.new_page()
+
+        page.set_default_timeout(config.timeout)
+
+        state = BrowserState(
+            playwright=playwright, browser=browser, context=context, page=page
+        )
+
+        page_id = str(uuid.uuid4())
+        state.pages[page_id] = page
+        state.current_page_id = page_id
+
+        await _setup_page_tracking(state)
+        await _setup_network_monitoring(state)
+
+        logger.info("Browser started successfully")
+        return state
+    except Exception:
+        # Best-effort cleanup on failure
+        try:
+            if context:
+                await context.close()
+            elif browser:
+                await browser.close()
+        except Exception:
+            pass
+        try:
+            await playwright.stop()
+        except Exception:
+            pass
+        raise
 
 
 def _compute_session_id() -> str:
@@ -367,115 +479,13 @@ def _enforce_session_retention(artifact_base: Path) -> None:
 async def browser_lifespan(server: FastMCP) -> AsyncIterator[BrowserState]:
     """Manage browser lifecycle."""
     logger.info("Starting browser...")
-
-    playwright = await async_playwright().start()
-
-    # Initialize variables for cleanup
-    use_persistent_context = config.user_data_dir is not None
-    browser = None
-    context = None
-
+    state: Optional[BrowserState] = None
     try:
-
-        if use_persistent_context:
-            # Use persistent context (no separate browser object)
-            launch_options = {
-                "headless": config.headless,
-                "viewport": {
-                    "width": config.viewport_width,
-                    "height": config.viewport_height,
-                },
-            }
-
-            if config.channel:
-                launch_options["channel"] = config.channel
-
-            if config.browser_type == "chromium":
-                context = await playwright.chromium.launch_persistent_context(
-                    config.user_data_dir, **launch_options
-                )
-            elif config.browser_type == "firefox":
-                context = await playwright.firefox.launch_persistent_context(
-                    config.user_data_dir, **launch_options
-                )
-            elif config.browser_type == "webkit":
-                context = await playwright.webkit.launch_persistent_context(
-                    config.user_data_dir, **launch_options
-                )
-            else:
-                raise ValueError(f"Unsupported browser type: {config.browser_type}")
-
-            # For persistent context, the browser is accessed via context.browser
-            browser = context.browser
-            # Get existing page or create new one
-            if context.pages:
-                page = context.pages[0]
-            else:
-                page = await context.new_page()
-        else:
-            # Regular browser launch
-            launch_options = {"headless": config.headless}
-            if config.channel:
-                launch_options["channel"] = config.channel
-
-            if config.browser_type == "chromium":
-                browser = await playwright.chromium.launch(**launch_options)
-            elif config.browser_type == "firefox":
-                browser = await playwright.firefox.launch(**launch_options)
-            elif config.browser_type == "webkit":
-                browser = await playwright.webkit.launch(**launch_options)
-            else:
-                raise ValueError(f"Unsupported browser type: {config.browser_type}")
-
-            # Create context
-            context = await browser.new_context(
-                viewport={
-                    "width": config.viewport_width,
-                    "height": config.viewport_height,
-                }
-            )
-
-            # Create page
-            page = await context.new_page()
-
-        # Set default timeout
-        page.set_default_timeout(config.timeout)
-
-        state = BrowserState(
-            playwright=playwright, browser=browser, context=context, page=page
-        )
-
-        # Initialize page tracking with the first page
-        import uuid
-        page_id = str(uuid.uuid4())
-        state.pages[page_id] = page
-        state.current_page_id = page_id
-
-        # Set up page tracking for new pages/tabs
-        await _setup_page_tracking(state)
-
-        # Set up network monitoring
-        await _setup_network_monitoring(state)
-
-        logger.info("Browser started successfully")
+        state = await _create_browser_state()
         yield state
-
     finally:
         logger.info("Shutting down browser...")
-        try:
-            if use_persistent_context and context:
-                # For persistent context, close the context (which closes the browser)
-                await context.close()
-            elif browser:
-                # For regular browser, close the browser
-                await browser.close()
-        except Exception as e:
-            logger.error(f"Error closing browser: {e}")
-
-        try:
-            await playwright.stop()
-        except Exception as e:
-            logger.error(f"Error stopping playwright: {e}")
+        await _shutdown_browser_state(state)
 
 
 # Create FastMCP server with browser lifespan
@@ -919,6 +929,45 @@ META_ATTRIBUTE_KEYS = {
     "data-test",
     "data-qa",
 }
+
+
+# Browser lifecycle tools
+@mcp.tool()
+async def restart_browser(ctx: Context, headed: bool = True) -> Dict[str, Any]:
+    """Restart the browser in headed or headless mode."""
+    async with _restart_lock:
+        state = get_browser_state(ctx)
+        previous_headless = config.headless
+        config.headless = not headed
+
+        try:
+            new_state = await _create_browser_state()
+        except Exception as exc:
+            config.headless = previous_headless
+            logger.error("Failed to start new browser during restart: %s", exc)
+            return {"success": False, "headed": headed, "error": str(exc)}
+
+        try:
+            await _shutdown_browser_state(state)
+        except Exception as exc:
+            logger.warning("Error shutting down previous browser during restart: %s", exc)
+
+        state.playwright = new_state.playwright
+        state.browser = new_state.browser
+        state.context = new_state.context
+        state.page = new_state.page
+        state.pages = new_state.pages
+        state.current_page_id = new_state.current_page_id
+        state.captured_requests = new_state.captured_requests
+        state.captured_responses = new_state.captured_responses
+        state.response_handles = new_state.response_handles
+        state.response_handle_order = new_state.response_handle_order
+
+        return {
+            "success": True,
+            "headed": headed,
+            "current_page_id": state.current_page_id,
+        }
 
 
 # Navigation Tools
@@ -3209,7 +3258,8 @@ async def clear_storage(ctx: Context, storage_type: str = "both") -> StorageResu
         StorageResult with success status, cleared storage types, and any errors
     """
     try:
-        browser_state = get_browser_state(ctx)
+        # Need the active page to execute storage clearing script
+        page = get_current_page(ctx)
 
         script = ""
         if storage_type in ["local", "both"]:
