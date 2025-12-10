@@ -1357,6 +1357,169 @@ async def restart_browser(ctx: Context, headed: bool = True) -> Dict[str, Any]:
         }
 
 
+@mcp.tool()
+async def recreate_context(
+    ctx: Context,
+    stealth: Optional[bool] = None,
+    mask_devtools: Optional[bool] = None,
+    user_agent: Optional[str] = None,
+    accept_language: Optional[str] = None,
+    languages: Optional[List[str]] = None,
+    locale: Optional[str] = None,
+    timezone_id: Optional[str] = None,
+    platform: Optional[str] = None,
+    vendor: Optional[str] = None,
+    hardware_concurrency: Optional[int] = None,
+    device_memory: Optional[float] = None,
+    device_scale_factor: Optional[float] = None,
+    sec_ch_ua: Optional[str] = None,
+    sec_ch_ua_mobile: Optional[str] = None,
+    sec_ch_ua_platform: Optional[str] = None,
+    sec_ch_ua_platform_version: Optional[str] = None,
+    sec_ch_ua_full_version_list: Optional[str] = None,
+    init_script: Optional[str] = None,
+    clear_init_script: bool = False,
+    grant_permissions: Optional[List[str]] = None,
+    permissions_origin: Optional[str] = None,
+    permission_overrides: Optional[Dict[str, str]] = None,
+    viewport_width: Optional[int] = None,
+    viewport_height: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Recreate the browser context with new fingerprint/stealth/init-script settings.
+
+    This closes the existing context and spins up a new one with the provided
+    overrides applied at creation time (UA, client hints, languages/locale/timezone,
+    device metrics, permissions, stealth/devtools masking, and init scripts).
+    """
+    async with _restart_lock:
+        state = get_browser_state(ctx)
+
+        # Snapshot current config so we can roll back on failure.
+        previous = {
+            "stealth": config.stealth,
+            "mask_devtools": config.mask_devtools,
+            "user_agent": config.user_agent,
+            "accept_language": config.accept_language,
+            "languages": list(config.languages),
+            "locale": config.locale,
+            "timezone_id": config.timezone_id,
+            "platform": config.platform,
+            "vendor": config.vendor,
+            "hardware_concurrency": config.hardware_concurrency,
+            "device_memory": config.device_memory,
+            "device_scale_factor": config.device_scale_factor,
+            "sec_ch_ua": config.sec_ch_ua,
+            "sec_ch_ua_mobile": config.sec_ch_ua_mobile,
+            "sec_ch_ua_platform": config.sec_ch_ua_platform,
+            "sec_ch_ua_platform_version": config.sec_ch_ua_platform_version,
+            "sec_ch_ua_full_version_list": config.sec_ch_ua_full_version_list,
+            "custom_init_script": config.custom_init_script,
+            "grant_permissions": list(config.grant_permissions),
+            "permission_overrides": dict(config.permission_overrides),
+            "permissions_origin": config.permissions_origin,
+            "viewport_width": config.viewport_width,
+            "viewport_height": config.viewport_height,
+        }
+
+        def set_if(value: Optional[Any], attr: str):
+            if value is not None:
+                setattr(config, attr, value)
+
+        set_if(stealth, "stealth")
+        if mask_devtools is not None:
+            config.mask_devtools = mask_devtools
+        elif stealth is not None and config.mask_devtools is None:
+            config.mask_devtools = stealth
+
+        set_if(user_agent, "user_agent")
+        set_if(accept_language, "accept_language")
+        if languages is not None:
+            config.languages = languages
+        set_if(locale, "locale")
+        set_if(timezone_id, "timezone_id")
+        set_if(platform, "platform")
+        set_if(vendor, "vendor")
+        set_if(hardware_concurrency, "hardware_concurrency")
+        set_if(device_memory, "device_memory")
+        set_if(device_scale_factor, "device_scale_factor")
+        set_if(sec_ch_ua, "sec_ch_ua")
+        set_if(sec_ch_ua_mobile, "sec_ch_ua_mobile")
+        set_if(sec_ch_ua_platform, "sec_ch_ua_platform")
+        set_if(sec_ch_ua_platform_version, "sec_ch_ua_platform_version")
+        set_if(sec_ch_ua_full_version_list, "sec_ch_ua_full_version_list")
+        if clear_init_script:
+            config.custom_init_script = None
+        if init_script is not None:
+            config.custom_init_script = init_script
+        if grant_permissions is not None:
+            config.grant_permissions = grant_permissions
+        if permission_overrides is not None:
+            config.permission_overrides = permission_overrides
+        if permissions_origin is not None:
+            config.permissions_origin = permissions_origin
+        if viewport_width is not None:
+            config.viewport_width = viewport_width
+        if viewport_height is not None:
+            config.viewport_height = viewport_height
+
+        try:
+            new_state = await _create_browser_state()
+        except Exception as exc:
+            # Roll back on failure.
+            for key, value in previous.items():
+                setattr(config, key, value)
+            logger.error("Failed to recreate context with new settings: %s", exc)
+            return {"success": False, "error": str(exc)}
+
+        try:
+            await _shutdown_browser_state(state)
+        except Exception as exc:
+            logger.warning("Error shutting down previous browser during recreate: %s", exc)
+
+        state.playwright = new_state.playwright
+        state.browser = new_state.browser
+        state.context = new_state.context
+        state.page = new_state.page
+        state.pages = new_state.pages
+        state.current_page_id = new_state.current_page_id
+        state.captured_requests = new_state.captured_requests
+        state.captured_responses = new_state.captured_responses
+        state.response_handles = new_state.response_handles
+        state.response_handle_order = new_state.response_handle_order
+
+        applied = {
+            "stealth": config.stealth,
+            "mask_devtools": config.mask_devtools,
+            "user_agent": config.user_agent,
+            "accept_language": config.accept_language,
+            "languages": config.languages,
+            "locale": config.locale,
+            "timezone_id": config.timezone_id,
+            "platform": config.platform,
+            "vendor": config.vendor,
+            "hardware_concurrency": config.hardware_concurrency,
+            "device_memory": config.device_memory,
+            "device_scale_factor": config.device_scale_factor,
+            "sec_ch_ua": config.sec_ch_ua,
+            "sec_ch_ua_mobile": config.sec_ch_ua_mobile,
+            "sec_ch_ua_platform": config.sec_ch_ua_platform,
+            "sec_ch_ua_platform_version": config.sec_ch_ua_platform_version,
+            "sec_ch_ua_full_version_list": config.sec_ch_ua_full_version_list,
+            "permissions_origin": config.permissions_origin,
+            "granted_permissions": config.grant_permissions,
+            "permission_overrides": config.permission_overrides,
+            "viewport_width": config.viewport_width,
+            "viewport_height": config.viewport_height,
+            "custom_init_script": bool(config.custom_init_script),
+        }
+
+        return {
+            "success": True,
+            "current_page_id": state.current_page_id,
+            "applied": applied,
+        }
+
+
 # Navigation Tools
 @mcp.tool()
 async def navigate(url: str, ctx: Context) -> NavigationResult:
