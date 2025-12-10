@@ -259,6 +259,28 @@ class Config:
         artifact_max_age_seconds: int = 7200,
         artifact_max_files: int = 200,
         artifact_chunk_size: int = 4096,
+        # Fingerprint and stealth controls
+        user_agent: Optional[str] = None,
+        accept_language: Optional[str] = None,
+        languages: Optional[List[str]] = None,
+        locale: Optional[str] = None,
+        timezone_id: Optional[str] = None,
+        device_scale_factor: Optional[float] = None,
+        platform: Optional[str] = None,
+        vendor: Optional[str] = None,
+        hardware_concurrency: Optional[int] = None,
+        device_memory: Optional[float] = None,
+        sec_ch_ua: Optional[str] = None,
+        sec_ch_ua_mobile: Optional[str] = None,
+        sec_ch_ua_platform: Optional[str] = None,
+        sec_ch_ua_platform_version: Optional[str] = None,
+        sec_ch_ua_full_version_list: Optional[str] = None,
+        stealth: bool = False,
+        mask_devtools: bool = False,
+        custom_init_script: Optional[str] = None,
+        permission_overrides: Optional[Dict[str, str]] = None,
+        grant_permissions: Optional[List[str]] = None,
+        permissions_origin: Optional[str] = None,
     ):
         self.headless = headless
         self.browser_type = browser_type
@@ -281,6 +303,28 @@ class Config:
         self.artifact_max_age_seconds = artifact_max_age_seconds
         self.artifact_max_files = artifact_max_files
         self.artifact_chunk_size = max(artifact_chunk_size, 256)
+        # Fingerprinting / stealth defaults
+        self.user_agent = user_agent
+        self.accept_language = accept_language
+        self.languages = languages or []
+        self.locale = locale
+        self.timezone_id = timezone_id
+        self.device_scale_factor = device_scale_factor
+        self.platform = platform
+        self.vendor = vendor
+        self.hardware_concurrency = hardware_concurrency
+        self.device_memory = device_memory
+        self.sec_ch_ua = sec_ch_ua
+        self.sec_ch_ua_mobile = sec_ch_ua_mobile
+        self.sec_ch_ua_platform = sec_ch_ua_platform
+        self.sec_ch_ua_platform_version = sec_ch_ua_platform_version
+        self.sec_ch_ua_full_version_list = sec_ch_ua_full_version_list
+        self.stealth = stealth
+        self.mask_devtools = mask_devtools
+        self.custom_init_script = custom_init_script
+        self.permission_overrides = permission_overrides or {}
+        self.grant_permissions = grant_permissions or []
+        self.permissions_origin = permissions_origin
 
 
 # Global configuration
@@ -308,6 +352,30 @@ async def _shutdown_browser_state(state: Optional[BrowserState]):
         logger.error("Error stopping playwright: %s", exc)
 
 
+async def _prepare_context(context: BrowserContext):
+    """Apply init scripts and permission grants to a freshly created context."""
+
+    scripts = [_build_context_init_script(config), config.custom_init_script]
+    for script in scripts:
+        if not script:
+            continue
+        try:
+            await context.add_init_script(script)
+            for page in context.pages:
+                try:
+                    await page.add_init_script(script)
+                except Exception as page_exc:
+                    logger.debug("Failed to add init script to existing page: %s", page_exc)
+        except Exception as exc:
+            logger.warning("Failed to apply init script to context: %s", exc)
+
+    if config.grant_permissions:
+        try:
+            await context.grant_permissions(config.grant_permissions, origin=config.permissions_origin)
+        except Exception as exc:
+            logger.warning("Failed to grant context permissions %s: %s", config.grant_permissions, exc)
+
+
 async def _create_browser_state() -> BrowserState:
     """Launch Playwright and return an initialized BrowserState based on config."""
     playwright = await async_playwright().start()
@@ -316,18 +384,46 @@ async def _create_browser_state() -> BrowserState:
     browser = None
     context = None
 
+    context_options: Dict[str, Any] = {
+        "viewport": {
+            "width": config.viewport_width,
+            "height": config.viewport_height,
+        },
+    }
+    if config.device_scale_factor is not None:
+        context_options["device_scale_factor"] = config.device_scale_factor
+        context_options.setdefault(
+            "screen",
+            {"width": config.viewport_width, "height": config.viewport_height},
+        )
+
+    if config.user_agent:
+        context_options["user_agent"] = config.user_agent
+
+    locale_value = config.locale or (config.languages[0] if config.languages else None)
+    if locale_value:
+        context_options["locale"] = locale_value
+    if config.timezone_id:
+        context_options["timezone_id"] = config.timezone_id
+
+    extra_headers = _build_extra_headers(config)
+    if extra_headers:
+        context_options["extra_http_headers"] = extra_headers
+
     try:
         if use_persistent_context:
             launch_options = {
                 "headless": config.headless,
-                "viewport": {
-                    "width": config.viewport_width,
-                    "height": config.viewport_height,
-                },
+                **context_options,
             }
-
             if config.channel:
                 launch_options["channel"] = config.channel
+            if config.browser_type == "chromium" and config.stealth:
+                launch_options["ignore_default_args"] = ["--enable-automation"]
+                extra_args = launch_options.get("args", [])
+                if "--disable-blink-features=AutomationControlled" not in extra_args:
+                    extra_args.append("--disable-blink-features=AutomationControlled")
+                launch_options["args"] = extra_args
 
             if config.browser_type == "chromium":
                 context = await playwright.chromium.launch_persistent_context(
@@ -345,11 +441,16 @@ async def _create_browser_state() -> BrowserState:
                 raise ValueError(f"Unsupported browser type: {config.browser_type}")
 
             browser = context.browser
-            page = context.pages[0] if context.pages else await context.new_page()
         else:
             launch_options = {"headless": config.headless}
             if config.channel:
                 launch_options["channel"] = config.channel
+            if config.browser_type == "chromium" and config.stealth:
+                launch_options["ignore_default_args"] = ["--enable-automation"]
+                extra_args = launch_options.get("args", [])
+                if "--disable-blink-features=AutomationControlled" not in extra_args:
+                    extra_args.append("--disable-blink-features=AutomationControlled")
+                launch_options["args"] = extra_args
 
             if config.browser_type == "chromium":
                 browser = await playwright.chromium.launch(**launch_options)
@@ -360,13 +461,11 @@ async def _create_browser_state() -> BrowserState:
             else:
                 raise ValueError(f"Unsupported browser type: {config.browser_type}")
 
-            context = await browser.new_context(
-                viewport={
-                    "width": config.viewport_width,
-                    "height": config.viewport_height,
-                }
-            )
-            page = await context.new_page()
+            context = await browser.new_context(**context_options)
+
+        await _prepare_context(context)
+
+        page = context.pages[0] if context.pages else await context.new_page()
 
         page.set_default_timeout(config.timeout)
 
@@ -473,6 +572,294 @@ def _enforce_session_retention(artifact_base: Path) -> None:
                 shutil.rmtree(path, ignore_errors=True)
         except Exception as exc:
             logger.debug("Failed to remove old session %s: %s", path, exc)
+
+
+def _parse_csv_list(value: Optional[str]) -> List[str]:
+    """Return a normalized list from a comma-separated string."""
+
+    if not value:
+        return []
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _parse_brand_list(header_value: Optional[str]) -> List[Dict[str, str]]:
+    """Parse a Sec-CH-UA style header into a list of brand/version pairs."""
+
+    if not header_value:
+        return []
+
+    brands: List[Dict[str, str]] = []
+    for raw_part in header_value.split(","):
+        part = raw_part.strip()
+        if not part or ";v=" not in part:
+            continue
+        brand_part, version_part = part.split(";v=", 1)
+        brand = brand_part.strip().strip('"')
+        version = version_part.strip().strip('"')
+        if brand:
+            brands.append({"brand": brand, "version": version})
+    return brands
+
+
+def _parse_ch_mobile(value: Optional[str]) -> Optional[bool]:
+    """Parse Sec-CH-UA-Mobile style values (?0/?1/true/false)."""
+
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    if normalized in {"?1", "1", "true", "yes"}:
+        return True
+    if normalized in {"?0", "0", "false", "no"}:
+        return False
+    return None
+
+
+def _build_client_hints_payload(cfg: Config) -> Dict[str, Any]:
+    """Build structured client hints data from config."""
+
+    brands = _parse_brand_list(cfg.sec_ch_ua)
+    full_version_list = _parse_brand_list(cfg.sec_ch_ua_full_version_list)
+    mobile = _parse_ch_mobile(cfg.sec_ch_ua_mobile)
+
+    payload: Dict[str, Any] = {}
+    if brands:
+        payload["brands"] = brands
+    if full_version_list:
+        payload["fullVersionList"] = full_version_list
+    if mobile is not None:
+        payload["mobile"] = mobile
+    if cfg.sec_ch_ua_platform:
+        payload["platform"] = cfg.sec_ch_ua_platform
+    if cfg.sec_ch_ua_platform_version:
+        payload["platformVersion"] = cfg.sec_ch_ua_platform_version
+    return payload
+
+
+def _build_extra_headers(cfg: Config) -> Dict[str, str]:
+    """Construct coherent headers (UA + client hints + locale) for the context."""
+
+    headers: Dict[str, str] = {}
+    if cfg.user_agent:
+        headers["User-Agent"] = cfg.user_agent
+
+    languages = cfg.languages or []
+    if cfg.accept_language:
+        headers["Accept-Language"] = cfg.accept_language
+    elif languages:
+        headers["Accept-Language"] = ",".join(languages)
+
+    if cfg.sec_ch_ua:
+        headers["Sec-CH-UA"] = cfg.sec_ch_ua
+    if cfg.sec_ch_ua_full_version_list:
+        headers["Sec-CH-UA-Full-Version-List"] = cfg.sec_ch_ua_full_version_list
+    if cfg.sec_ch_ua_mobile:
+        headers["Sec-CH-UA-Mobile"] = cfg.sec_ch_ua_mobile
+    if cfg.sec_ch_ua_platform:
+        headers["Sec-CH-UA-Platform"] = cfg.sec_ch_ua_platform
+    if cfg.sec_ch_ua_platform_version:
+        headers["Sec-CH-UA-Platform-Version"] = cfg.sec_ch_ua_platform_version
+
+    return headers
+
+
+def _build_context_init_script(cfg: Config) -> Optional[str]:
+    """Build a single init script that applies stealth and fingerprint settings early."""
+
+    active = any(
+        [
+            cfg.stealth,
+            cfg.user_agent,
+            cfg.languages,
+            cfg.accept_language,
+            cfg.platform,
+            cfg.vendor,
+            cfg.hardware_concurrency,
+            cfg.device_memory,
+            cfg.device_scale_factor,
+            cfg.permission_overrides,
+            cfg.sec_ch_ua
+            or cfg.sec_ch_ua_full_version_list
+            or cfg.sec_ch_ua_mobile
+            or cfg.sec_ch_ua_platform
+            or cfg.sec_ch_ua_platform_version,
+        ]
+    )
+    if not active:
+        return None
+
+    options: Dict[str, Any] = {
+        "userAgent": cfg.user_agent,
+        "languages": cfg.languages,
+        "acceptLanguage": cfg.accept_language,
+        "platform": cfg.platform,
+        "vendor": cfg.vendor,
+        "hardwareConcurrency": cfg.hardware_concurrency,
+        "deviceMemory": cfg.device_memory,
+        "deviceScaleFactor": cfg.device_scale_factor,
+        "viewport": {
+            "width": cfg.viewport_width,
+            "height": cfg.viewport_height,
+        },
+        "clientHints": _build_client_hints_payload(cfg) or None,
+        "stealth": cfg.stealth,
+        "maskDevtools": cfg.mask_devtools or cfg.stealth,
+        "permissionStates": cfg.permission_overrides,
+    }
+
+    script = f"""
+(() => {{
+  const cfg = {json.dumps(options)};
+
+  const defineValue = (target, key, value) => {{
+    try {{
+      Object.defineProperty(target, key, {{
+        get: () => value,
+        configurable: true,
+      }});
+    }} catch (_err) {{}}
+  }};
+
+  const defineGetter = (target, key, getter) => {{
+    try {{
+      Object.defineProperty(target, key, {{
+        get: getter,
+        configurable: true,
+      }});
+    }} catch (_err) {{}}
+  }};
+
+  try {{ defineValue(navigator, 'webdriver', undefined); }} catch (_err) {{}}
+
+  if (cfg.userAgent) {{
+    defineValue(navigator, 'userAgent', cfg.userAgent);
+    defineValue(navigator, 'appVersion', cfg.userAgent);
+  }}
+  if (cfg.platform) defineValue(navigator, 'platform', cfg.platform);
+  if (cfg.vendor) defineValue(navigator, 'vendor', cfg.vendor);
+  if (cfg.hardwareConcurrency) defineValue(navigator, 'hardwareConcurrency', cfg.hardwareConcurrency);
+  if (cfg.deviceMemory) defineValue(navigator, 'deviceMemory', cfg.deviceMemory);
+
+  const langs = Array.isArray(cfg.languages) ? cfg.languages.filter(Boolean) : [];
+  if (langs.length) {{
+    defineValue(navigator, 'languages', langs.slice());
+    defineValue(navigator, 'language', langs[0]);
+  }} else if (cfg.acceptLanguage) {{
+    const pieces = cfg.acceptLanguage.split(',').map(p => p.trim()).filter(Boolean);
+    if (pieces.length) {{
+      defineValue(navigator, 'languages', pieces);
+      defineValue(navigator, 'language', pieces[0]);
+    }}
+  }}
+
+  if (cfg.deviceScaleFactor) {{
+    defineValue(window, 'devicePixelRatio', cfg.deviceScaleFactor);
+  }}
+
+  if (cfg.viewport && cfg.viewport.width && cfg.viewport.height) {{
+    const width = cfg.viewport.width;
+    const height = cfg.viewport.height;
+    const screenObj = window.screen || {{}};
+    defineValue(screenObj, 'width', width);
+    defineValue(screenObj, 'height', height);
+    defineValue(screenObj, 'availWidth', width);
+    defineValue(screenObj, 'availHeight', height);
+    try {{
+      if (!window.screen) {{
+        Object.defineProperty(window, 'screen', {{ get: () => screenObj, configurable: true }});
+      }}
+    }} catch (_err) {{}}
+  }}
+
+  const permissionStates = cfg.permissionStates || {{}};
+  if (navigator.permissions && navigator.permissions.query) {{
+    const originalQuery = navigator.permissions.query.bind(navigator.permissions);
+    navigator.permissions.query = (parameters) => {{
+      const name = parameters && parameters.name;
+      if (name && permissionStates[name]) {{
+        return Promise.resolve({{ state: permissionStates[name], onchange: null }});
+      }}
+      return originalQuery(parameters);
+    }};
+  }}
+
+  if (cfg.clientHints) {{
+    const ch = cfg.clientHints;
+    const uaData = {{
+      get brands() {{ return ch.brands || []; }},
+      get mobile() {{ return !!ch.mobile; }},
+      get platform() {{ return ch.platform || ''; }},
+      get platformVersion() {{ return ch.platformVersion || ''; }},
+      get architecture() {{ return ch.architecture || ''; }},
+      get model() {{ return ch.model || ''; }},
+      get uaFullVersion() {{
+        if (ch.fullVersion) return ch.fullVersion;
+        if (Array.isArray(ch.fullVersionList) && ch.fullVersionList.length) {{
+          return ch.fullVersionList[0].version || '';
+        }}
+        return '';
+      }},
+      get fullVersionList() {{ return ch.fullVersionList || []; }},
+      toJSON() {{ return {{
+        brands: this.brands,
+        mobile: this.mobile,
+        platform: this.platform,
+        platformVersion: this.platformVersion,
+        fullVersionList: this.fullVersionList,
+      }}; }},
+    }};
+    defineValue(navigator, 'userAgentData', uaData);
+  }}
+
+  if (cfg.stealth) {{
+    if (!window.chrome) {{
+      window.chrome = {{ runtime: {{ connect: () => ({{}}), sendMessage: () => undefined, onMessage: {{ addListener: () => undefined, removeListener: () => undefined }} }} }};
+    }} else if (!window.chrome.runtime) {{
+      window.chrome.runtime = {{ connect: () => ({{}}), sendMessage: () => undefined, onMessage: {{ addListener: () => undefined, removeListener: () => undefined }} }};
+    }}
+
+    const pluginEntries = [
+      {{ name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' }},
+      {{ name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' }},
+      {{ name: 'Native Client', filename: 'internal-nacl-plugin', description: '' }},
+    ];
+    const mimeTypes = [
+      {{ type: 'application/pdf', suffixes: 'pdf', description: 'Portable Document Format', enabledPlugin: undefined }},
+      {{ type: 'application/x-google-chrome-pdf', suffixes: 'pdf', description: 'Portable Document Format', enabledPlugin: undefined }},
+      {{ type: 'application/x-nacl', suffixes: '', description: 'Native Client Executable', enabledPlugin: undefined }},
+      {{ type: 'application/x-pnacl', suffixes: '', description: 'Portable Native Client Executable', enabledPlugin: undefined }},
+    ];
+    if (!navigator.plugins || navigator.plugins.length === 0) {{
+      const pluginArray = pluginEntries.map((p) => Object.assign({{ 0: mimeTypes[0], length: 1 }}, p));
+      defineValue(navigator, 'plugins', pluginArray);
+    }}
+    if (!navigator.mimeTypes || navigator.mimeTypes.length === 0) {{
+      defineValue(navigator, 'mimeTypes', mimeTypes);
+    }}
+    try {{ delete window.cdc_adoQpoasnfa76pfcZLmcfl_; }} catch (_err) {{}}
+    try {{ delete window.__nightmare; }} catch (_err) {{}}
+  }}
+
+  if (cfg.maskDevtools) {{
+    const fallbackGap = 120;
+    defineGetter(window, 'outerWidth', () => {{
+      const base = window.innerWidth || 0;
+      const avail = (window.screen && window.screen.availWidth) || base;
+      return Math.max(base + fallbackGap, avail);
+    }});
+    defineGetter(window, 'outerHeight', () => {{
+      const base = window.innerHeight || 0;
+      const avail = (window.screen && window.screen.availHeight) || base;
+      return Math.max(base + fallbackGap, avail);
+    }});
+    ['__IS_DEVTOOLS_OPEN__', '__isDevtoolsOpen', '__devtoolsOpen'].forEach((key) => defineValue(window, key, false));
+    if (!window.__REACT_DEVTOOLS_GLOBAL_HOOK__) {{
+      defineValue(window, '__REACT_DEVTOOLS_GLOBAL_HOOK__', undefined);
+    }}
+  }}
+}})();
+    """
+
+    return script
 
 
 @asynccontextmanager
@@ -3416,6 +3803,121 @@ def main():
         default=config.artifact_chunk_size,
         help="Default number of bytes returned by artifact chunk reads",
     )
+    parser.add_argument(
+        "--user-agent",
+        dest="user_agent",
+        help="User-Agent to present at context creation time",
+    )
+    parser.add_argument(
+        "--accept-language",
+        dest="accept_language",
+        help="Accept-Language header to send with all requests",
+    )
+    parser.add_argument(
+        "--languages",
+        dest="languages",
+        help="Comma-separated navigator.languages override (first entry becomes navigator.language when locale is not provided)",
+    )
+    parser.add_argument(
+        "--locale",
+        dest="locale",
+        help="Context locale (falls back to the first language when omitted)",
+    )
+    parser.add_argument(
+        "--timezone-id",
+        dest="timezone_id",
+        help="IANA timezone id for the context (e.g., America/Los_Angeles)",
+    )
+    parser.add_argument(
+        "--device-scale-factor",
+        dest="device_scale_factor",
+        type=float,
+        help="Device pixel ratio for the context (affects devicePixelRatio)",
+    )
+    parser.add_argument(
+        "--platform",
+        dest="platform",
+        help="navigator.platform override (e.g., MacIntel)",
+    )
+    parser.add_argument(
+        "--vendor",
+        dest="vendor",
+        help="navigator.vendor override (e.g., Google Inc.)",
+    )
+    parser.add_argument(
+        "--hardware-concurrency",
+        dest="hardware_concurrency",
+        type=int,
+        help="navigator.hardwareConcurrency override",
+    )
+    parser.add_argument(
+        "--device-memory",
+        dest="device_memory",
+        type=float,
+        help="navigator.deviceMemory override",
+    )
+    parser.add_argument(
+        "--sec-ch-ua",
+        dest="sec_ch_ua",
+        help='Sec-CH-UA header value (e.g., "\\"Chromium\\";v=\\"120\\", \\"Google Chrome\\";v=\\"120\\"")',
+    )
+    parser.add_argument(
+        "--sec-ch-ua-full-version-list",
+        dest="sec_ch_ua_full_version_list",
+        help="Sec-CH-UA-Full-Version-List header value",
+    )
+    parser.add_argument(
+        "--sec-ch-ua-mobile",
+        dest="sec_ch_ua_mobile",
+        help="Sec-CH-UA-Mobile header value (?0/?1)",
+    )
+    parser.add_argument(
+        "--sec-ch-ua-platform",
+        dest="sec_ch_ua_platform",
+        help="Sec-CH-UA-Platform header value (e.g., macOS)",
+    )
+    parser.add_argument(
+        "--sec-ch-ua-platform-version",
+        dest="sec_ch_ua_platform_version",
+        help="Sec-CH-UA-Platform-Version header value",
+    )
+    parser.add_argument(
+        "--stealth",
+        action="store_true",
+        help="Enable a maintained stealth preset (webdriver masking, chrome.runtime stub, plugins/mimeTypes, permissions shim)",
+    )
+    parser.add_argument(
+        "--stealth-devtools",
+        action="store_true",
+        help="Mask devtools/CDP presence even without --stealth (implied by --stealth)",
+    )
+    parser.add_argument(
+        "--no-stealth-devtools",
+        action="store_true",
+        help="Disable devtools/CDP masking when using --stealth",
+    )
+    parser.add_argument(
+        "--init-script",
+        dest="init_script",
+        help="Path to a JS file injected with add_init_script before any page scripts run",
+    )
+    parser.add_argument(
+        "--grant-permissions",
+        dest="grant_permissions",
+        help="Comma-separated permissions to grant to the context (e.g., geolocation,clipboard-read)",
+    )
+    parser.add_argument(
+        "--permissions-origin",
+        dest="permissions_origin",
+        help="Origin to scope granted permissions to (defaults to all origins)",
+    )
+    parser.add_argument(
+        "--permission-state",
+        action="append",
+        dest="permission_states",
+        default=[],
+        help="Override navigator.permissions.query for a permission (format: name=state). Repeatable.",
+    )
 
     args = parser.parse_args()
 
@@ -3437,6 +3939,44 @@ def main():
     config.artifact_max_age_seconds = max(args.artifact_max_age_seconds, 0)
     config.artifact_max_files = args.artifact_max_files
     config.artifact_chunk_size = max(args.artifact_chunk_size, 256)
+    config.user_agent = args.user_agent
+    config.accept_language = args.accept_language
+    config.languages = _parse_csv_list(args.languages)
+    config.locale = args.locale
+    config.timezone_id = args.timezone_id
+    config.device_scale_factor = args.device_scale_factor
+    config.platform = args.platform
+    config.vendor = args.vendor
+    config.hardware_concurrency = args.hardware_concurrency
+    config.device_memory = args.device_memory
+    config.sec_ch_ua = args.sec_ch_ua
+    config.sec_ch_ua_mobile = args.sec_ch_ua_mobile
+    config.sec_ch_ua_platform = args.sec_ch_ua_platform
+    config.sec_ch_ua_platform_version = args.sec_ch_ua_platform_version
+    config.sec_ch_ua_full_version_list = args.sec_ch_ua_full_version_list
+    config.stealth = args.stealth
+    config.mask_devtools = (args.stealth and not args.no_stealth_devtools) or args.stealth_devtools
+    config.grant_permissions = _parse_csv_list(args.grant_permissions)
+    config.permissions_origin = args.permissions_origin
+    config.permission_overrides = {}
+    for entry in args.permission_states or []:
+        if "=" not in entry:
+            logger.warning("Ignoring permission override without '=': %s", entry)
+            continue
+        name, state = entry.split("=", 1)
+        name = name.strip()
+        state = state.strip()
+        if not name or not state:
+            logger.warning("Ignoring malformed permission override: %s", entry)
+            continue
+        config.permission_overrides[name] = state
+
+    if args.init_script:
+        try:
+            script_path = Path(args.init_script).expanduser()
+            config.custom_init_script = script_path.read_text(encoding="utf-8")
+        except Exception as exc:
+            logger.error("Failed to read init script %s: %s", args.init_script, exc)
 
     # Setup logging before emitting any log lines
     logging.basicConfig(level=logging.INFO)

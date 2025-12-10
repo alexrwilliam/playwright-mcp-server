@@ -100,6 +100,14 @@ playwright-mcp stdio --channel chrome-beta
 playwright-mcp stdio --channel chrome-dev
 ```
 
+### Stealth & Fingerprinting Controls
+
+- Built-in stealth preset: `--stealth` masks `navigator.webdriver`, stubs `chrome.runtime`, injects realistic plugins/mimeTypes, shims permissions, and masks devtools/CDP probes (disable the devtools masking with `--no-stealth-devtools`, or enable it standalone via `--stealth-devtools`).
+- Init scripts: `--init-script ./hacks.js` injects your own JS via `context.add_init_script` before any page scripts execute.
+- Fingerprint knobs (applied at context creation): `--user-agent`, `--sec-ch-ua*`, `--accept-language`, `--languages`, `--locale`, `--timezone-id`, `--platform`, `--vendor`, `--hardware-concurrency`, `--device-memory`, `--device-scale-factor`, plus viewport flags already present.
+- Permission shaping: `--grant-permissions geolocation,clipboard-read --permission-state notifications=granted` pre-grants context permissions and overrides `navigator.permissions.query` responses.
+- Example: `playwright-mcp stdio --stealth --user-agent "Mozilla/5.0 ..." --sec-ch-ua "\"Chromium\";v=\"122\", \"Google Chrome\";v=\"122\"" --languages en-US,en --platform MacIntel --vendor "Google Inc." --hardware-concurrency 8 --device-memory 8 --device-scale-factor 2`.
+
 ### Integration with Claude Desktop
 
 Add to your `claude_desktop_config.json`:
