@@ -1419,17 +1419,32 @@ META_ATTRIBUTE_KEYS = {
 
 # Browser lifecycle tools
 @mcp.tool()
-async def restart_browser(ctx: Context, headed: bool = True) -> Dict[str, Any]:
-    """Restart the browser in headed or headless mode."""
+async def restart_browser(
+    ctx: Context,
+    headed: bool = True,
+    channel: Optional[str] = None,
+    user_data_dir: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Restart the browser; optionally change headed/headless, channel, or user data dir."""
     async with _restart_lock:
         state = get_browser_state(ctx)
-        previous_headless = config.headless
+        previous = {
+            "headless": config.headless,
+            "channel": config.channel,
+            "user_data_dir": config.user_data_dir,
+        }
+
         config.headless = not headed
+        if channel is not None:
+            config.channel = channel
+        if user_data_dir is not None:
+            config.user_data_dir = user_data_dir
 
         try:
             new_state = await _create_browser_state()
         except Exception as exc:
-            config.headless = previous_headless
+            for key, value in previous.items():
+                setattr(config, key, value)
             logger.error("Failed to start new browser during restart: %s", exc)
             return {"success": False, "headed": headed, "error": str(exc)}
 
@@ -1452,6 +1467,8 @@ async def restart_browser(ctx: Context, headed: bool = True) -> Dict[str, Any]:
         return {
             "success": True,
             "headed": headed,
+            "channel": config.channel,
+            "user_data_dir": config.user_data_dir,
             "current_page_id": state.current_page_id,
         }
 
