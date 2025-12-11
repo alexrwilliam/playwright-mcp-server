@@ -12,6 +12,9 @@ import mimetypes
 import sys
 import time
 import uuid
+import random
+
+from playwright_mcp import cdp_patch
 from collections import deque
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -281,6 +284,12 @@ class Config:
         permission_overrides: Optional[Dict[str, str]] = None,
         grant_permissions: Optional[List[str]] = None,
         permissions_origin: Optional[str] = None,
+        fill_plugins: bool = True,
+        override_languages: bool = True,
+        stub_chrome_runtime: bool = True,
+        override_viewport: bool = True,
+        force_devtools_closed: bool = True,
+        apply_cdp_patch: bool = False,
     ):
         self.headless = headless
         self.browser_type = browser_type
@@ -325,11 +334,76 @@ class Config:
         self.permission_overrides = permission_overrides or {}
         self.grant_permissions = grant_permissions or []
         self.permissions_origin = permissions_origin
+        self.fill_plugins = fill_plugins
+        self.override_languages = override_languages
+        self.stub_chrome_runtime = stub_chrome_runtime
+        self.override_viewport = override_viewport
+        self.force_devtools_closed = force_devtools_closed
+        self.apply_cdp_patch = apply_cdp_patch
 
 
 # Global configuration
 config = Config()
+ANTIDETECT_PRESETS: Dict[str, Dict[str, Any]] = {
+    "pixelscan": {
+        "headless": False,
+        "stealth": True,
+        "channel": "chrome",
+        # Keep webdriver masking but avoid devtools size spoofing which Pixelscan flags.
+        "mask_devtools": False,
+        # Let Chromium decide Accept-Language via locale to avoid mismatch warnings.
+        "accept_language": None,
+        # Let the browser-native language values flow through; overriding can look synthetic.
+        "languages": [],
+        "locale": "en-US",
+        # Use native window/viewport; avoid forcing viewport values.
+        "viewport_pool": [],
+        # Avoid synthetic plugin/mime arrays; Pixelscan prefers native values.
+        "fill_plugins": False,
+        # Do not stub chrome.runtime; leave native chrome object untouched.
+        "stub_chrome_runtime": False,
+        # Do not override navigator.language/languages; use browser defaults.
+        "override_languages": False,
+        # Leave viewport untouched so outer/inner dimensions stay realistic.
+        "override_viewport": False,
+        # Explicitly report devtools closed without size spoofing.
+        "force_devtools_closed": True,
+        # Apply CDP transport patch to reduce control-channel fingerprints.
+        "apply_cdp_patch": True,
+    }
+}
 _restart_lock = asyncio.Lock()
+
+
+def _get_antidetect_preset(name: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not name:
+        return None
+    return ANTIDETECT_PRESETS.get(name.lower())
+
+
+def _apply_antidetect_preset(preset: Optional[Dict[str, Any]]):
+    """Apply preset values to global config with support for viewport pooling."""
+
+    if not preset:
+        return
+
+    viewport_pool = preset.get("viewport_pool") or []
+    chosen_viewport: Optional[Dict[str, Any]] = None
+    if viewport_pool:
+        chosen_viewport = random.choice(viewport_pool)
+
+    for key, value in preset.items():
+        if key == "viewport_pool":
+            continue
+        setattr(config, key, value)
+
+    if chosen_viewport and getattr(config, "override_viewport", True):
+        config.viewport_width = chosen_viewport.get("width", config.viewport_width)
+        config.viewport_height = chosen_viewport.get("height", config.viewport_height)
+        if "device_scale_factor" in chosen_viewport:
+            config.device_scale_factor = chosen_viewport["device_scale_factor"]
+    if "apply_cdp_patch" in preset:
+        config.apply_cdp_patch = preset["apply_cdp_patch"]
 
 
 async def _shutdown_browser_state(state: Optional[BrowserState]):
@@ -378,24 +452,30 @@ async def _prepare_context(context: BrowserContext):
 
 async def _create_browser_state() -> BrowserState:
     """Launch Playwright and return an initialized BrowserState based on config."""
+    if config.apply_cdp_patch:
+        try:
+            cdp_patch.apply()
+        except Exception as exc:
+            logger.warning("CDP patch apply failed: %s", exc)
+
     playwright = await async_playwright().start()
 
     use_persistent_context = config.user_data_dir is not None
     browser = None
     context = None
 
-    context_options: Dict[str, Any] = {
-        "viewport": {
+    context_options: Dict[str, Any] = {}
+    if config.override_viewport:
+        context_options["viewport"] = {
             "width": config.viewport_width,
             "height": config.viewport_height,
-        },
-    }
-    if config.device_scale_factor is not None:
-        context_options["device_scale_factor"] = config.device_scale_factor
-        context_options.setdefault(
-            "screen",
-            {"width": config.viewport_width, "height": config.viewport_height},
-        )
+        }
+        if config.device_scale_factor is not None:
+            context_options["device_scale_factor"] = config.device_scale_factor
+            context_options.setdefault(
+                "screen",
+                {"width": config.viewport_width, "height": config.viewport_height},
+            )
 
     if config.user_agent:
         context_options["user_agent"] = config.user_agent
@@ -699,11 +779,16 @@ def _build_context_init_script(cfg: Config) -> Optional[str]:
         "viewport": {
             "width": cfg.viewport_width,
             "height": cfg.viewport_height,
-        },
+        } if cfg.override_viewport else None,
         "clientHints": _build_client_hints_payload(cfg) or None,
         "stealth": cfg.stealth,
-        "maskDevtools": cfg.mask_devtools or cfg.stealth,
+        "maskDevtools": cfg.mask_devtools,
+        "fillPlugins": cfg.fill_plugins,
         "permissionStates": cfg.permission_overrides,
+        "overrideLanguages": cfg.override_languages,
+        "stubChromeRuntime": cfg.stub_chrome_runtime,
+        "overrideViewport": cfg.override_viewport,
+        "forceDevtoolsClosed": cfg.force_devtools_closed,
     }
 
     script = f"""
@@ -728,7 +813,9 @@ def _build_context_init_script(cfg: Config) -> Optional[str]:
     }} catch (_err) {{}}
   }};
 
-  try {{ defineValue(navigator, 'webdriver', undefined); }} catch (_err) {{}}
+  // Prefer removing webdriver entirely so `'webdriver' in navigator` is false.
+  try {{ delete Navigator.prototype.webdriver; }} catch (_err) {{}}
+  try {{ delete navigator.webdriver; }} catch (_err) {{}}
 
   if (cfg.userAgent) {{
     defineValue(navigator, 'userAgent', cfg.userAgent);
@@ -739,15 +826,17 @@ def _build_context_init_script(cfg: Config) -> Optional[str]:
   if (cfg.hardwareConcurrency) defineValue(navigator, 'hardwareConcurrency', cfg.hardwareConcurrency);
   if (cfg.deviceMemory) defineValue(navigator, 'deviceMemory', cfg.deviceMemory);
 
-  const langs = Array.isArray(cfg.languages) ? cfg.languages.filter(Boolean) : [];
-  if (langs.length) {{
-    defineValue(navigator, 'languages', langs.slice());
-    defineValue(navigator, 'language', langs[0]);
-  }} else if (cfg.acceptLanguage) {{
-    const pieces = cfg.acceptLanguage.split(',').map(p => p.trim()).filter(Boolean);
-    if (pieces.length) {{
-      defineValue(navigator, 'languages', pieces);
-      defineValue(navigator, 'language', pieces[0]);
+  if (cfg.overrideLanguages) {{
+    const langs = Array.isArray(cfg.languages) ? cfg.languages.filter(Boolean) : [];
+    if (langs.length) {{
+      defineValue(navigator, 'languages', langs.slice());
+      defineValue(navigator, 'language', langs[0]);
+    }} else if (cfg.acceptLanguage) {{
+      const pieces = cfg.acceptLanguage.split(',').map(p => p.trim()).filter(Boolean);
+      if (pieces.length) {{
+        defineValue(navigator, 'languages', pieces);
+        defineValue(navigator, 'language', pieces[0]);
+      }}
     }}
   }}
 
@@ -755,7 +844,7 @@ def _build_context_init_script(cfg: Config) -> Optional[str]:
     defineValue(window, 'devicePixelRatio', cfg.deviceScaleFactor);
   }}
 
-  if (cfg.viewport && cfg.viewport.width && cfg.viewport.height) {{
+  if (cfg.overrideViewport && cfg.viewport && cfg.viewport.width && cfg.viewport.height) {{
     const width = cfg.viewport.width;
     const height = cfg.viewport.height;
     const screenObj = window.screen || {{}};
@@ -810,30 +899,40 @@ def _build_context_init_script(cfg: Config) -> Optional[str]:
     defineValue(navigator, 'userAgentData', uaData);
   }}
 
+  if (cfg.forceDevtoolsClosed) {{
+    ['__IS_DEVTOOLS_OPEN__', '__isDevtoolsOpen', '__devtoolsOpen', 'isDevtoolsOpen', 'isDevtoolOpen'].forEach((key) => {{
+      try {{ defineValue(window, key, false); }} catch (_err) {{}}
+    }});
+  }}
+
   if (cfg.stealth) {{
-    if (!window.chrome) {{
-      window.chrome = {{ runtime: {{ connect: () => ({{}}), sendMessage: () => undefined, onMessage: {{ addListener: () => undefined, removeListener: () => undefined }} }} }};
-    }} else if (!window.chrome.runtime) {{
-      window.chrome.runtime = {{ connect: () => ({{}}), sendMessage: () => undefined, onMessage: {{ addListener: () => undefined, removeListener: () => undefined }} }};
+    if (cfg.stubChromeRuntime) {{
+      if (!window.chrome) {{
+        window.chrome = {{ runtime: {{ connect: () => ({{}}), sendMessage: () => undefined, onMessage: {{ addListener: () => undefined, removeListener: () => undefined }} }} }};
+      }} else if (!window.chrome.runtime) {{
+        window.chrome.runtime = {{ connect: () => ({{}}), sendMessage: () => undefined, onMessage: {{ addListener: () => undefined, removeListener: () => undefined }} }};
+      }}
     }}
 
-    const pluginEntries = [
-      {{ name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' }},
-      {{ name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' }},
-      {{ name: 'Native Client', filename: 'internal-nacl-plugin', description: '' }},
-    ];
-    const mimeTypes = [
-      {{ type: 'application/pdf', suffixes: 'pdf', description: 'Portable Document Format', enabledPlugin: undefined }},
-      {{ type: 'application/x-google-chrome-pdf', suffixes: 'pdf', description: 'Portable Document Format', enabledPlugin: undefined }},
-      {{ type: 'application/x-nacl', suffixes: '', description: 'Native Client Executable', enabledPlugin: undefined }},
-      {{ type: 'application/x-pnacl', suffixes: '', description: 'Portable Native Client Executable', enabledPlugin: undefined }},
-    ];
-    if (!navigator.plugins || navigator.plugins.length === 0) {{
-      const pluginArray = pluginEntries.map((p) => Object.assign({{ 0: mimeTypes[0], length: 1 }}, p));
-      defineValue(navigator, 'plugins', pluginArray);
-    }}
-    if (!navigator.mimeTypes || navigator.mimeTypes.length === 0) {{
-      defineValue(navigator, 'mimeTypes', mimeTypes);
+    if (cfg.fillPlugins) {{
+      const pluginEntries = [
+        {{ name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' }},
+        {{ name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' }},
+        {{ name: 'Native Client', filename: 'internal-nacl-plugin', description: '' }},
+      ];
+      const mimeTypes = [
+        {{ type: 'application/pdf', suffixes: 'pdf', description: 'Portable Document Format', enabledPlugin: undefined }},
+        {{ type: 'application/x-google-chrome-pdf', suffixes: 'pdf', description: 'Portable Document Format', enabledPlugin: undefined }},
+        {{ type: 'application/x-nacl', suffixes: '', description: 'Native Client Executable', enabledPlugin: undefined }},
+        {{ type: 'application/x-pnacl', suffixes: '', description: 'Portable Native Client Executable', enabledPlugin: undefined }},
+      ];
+      if (!navigator.plugins || navigator.plugins.length === 0) {{
+        const pluginArray = pluginEntries.map((p) => Object.assign({{ 0: mimeTypes[0], length: 1 }}, p));
+        defineValue(navigator, 'plugins', pluginArray);
+      }}
+      if (!navigator.mimeTypes || navigator.mimeTypes.length === 0) {{
+        defineValue(navigator, 'mimeTypes', mimeTypes);
+      }}
     }}
     try {{ delete window.cdc_adoQpoasnfa76pfcZLmcfl_; }} catch (_err) {{}}
     try {{ delete window.__nightmare; }} catch (_err) {{}}
@@ -1360,6 +1459,8 @@ async def restart_browser(ctx: Context, headed: bool = True) -> Dict[str, Any]:
 @mcp.tool()
 async def recreate_context(
     ctx: Context,
+    antidetect_preset: Optional[str] = None,
+    headless: Optional[bool] = None,
     stealth: Optional[bool] = None,
     mask_devtools: Optional[bool] = None,
     user_agent: Optional[str] = None,
@@ -1396,6 +1497,7 @@ async def recreate_context(
 
         # Snapshot current config so we can roll back on failure.
         previous = {
+            "headless": config.headless,
             "stealth": config.stealth,
             "mask_devtools": config.mask_devtools,
             "user_agent": config.user_agent,
@@ -1421,10 +1523,16 @@ async def recreate_context(
             "viewport_height": config.viewport_height,
         }
 
+        preset = _get_antidetect_preset(antidetect_preset)
+        if antidetect_preset and not preset:
+            return {"success": False, "error": f"Unknown anti-detect preset: {antidetect_preset}"}
+        _apply_antidetect_preset(preset)
+
         def set_if(value: Optional[Any], attr: str):
             if value is not None:
                 setattr(config, attr, value)
 
+        set_if(headless, "headless")
         set_if(stealth, "stealth")
         if mask_devtools is not None:
             config.mask_devtools = mask_devtools
@@ -1511,6 +1619,8 @@ async def recreate_context(
             "viewport_width": config.viewport_width,
             "viewport_height": config.viewport_height,
             "custom_init_script": bool(config.custom_init_script),
+            "headless": config.headless,
+            "antidetect_preset": antidetect_preset,
         }
 
         return {
@@ -1518,6 +1628,137 @@ async def recreate_context(
             "current_page_id": state.current_page_id,
             "applied": applied,
         }
+
+
+@mcp.tool()
+async def apply_antidetect_preset(ctx: Context, preset: str = "pixelscan") -> Dict[str, Any]:
+    """Apply an anti-detect preset and rebuild the context."""
+
+    return await recreate_context(ctx=ctx, antidetect_preset=preset)
+
+
+@mcp.tool()
+async def get_effective_config(ctx: Context) -> Dict[str, Any]:
+    """Return the currently applied fingerprint/stealth/browser settings."""
+
+    state = get_browser_state(ctx)
+    return {
+        "headless": config.headless,
+        "browser_type": config.browser_type,
+        "channel": config.channel,
+        "stealth": config.stealth,
+        "mask_devtools": config.mask_devtools,
+        "force_devtools_closed": config.force_devtools_closed,
+        "apply_cdp_patch": config.apply_cdp_patch,
+        "override_viewport": config.override_viewport,
+        "viewport_width": config.viewport_width,
+        "viewport_height": config.viewport_height,
+        "device_scale_factor": config.device_scale_factor,
+        "user_agent": config.user_agent,
+        "accept_language": config.accept_language,
+        "languages": config.languages,
+        "locale": config.locale,
+        "timezone_id": config.timezone_id,
+        "platform": config.platform,
+        "vendor": config.vendor,
+        "hardware_concurrency": config.hardware_concurrency,
+        "device_memory": config.device_memory,
+        "sec_ch_ua": config.sec_ch_ua,
+        "sec_ch_ua_mobile": config.sec_ch_ua_mobile,
+        "sec_ch_ua_platform": config.sec_ch_ua_platform,
+        "sec_ch_ua_platform_version": config.sec_ch_ua_platform_version,
+        "sec_ch_ua_full_version_list": config.sec_ch_ua_full_version_list,
+        "fill_plugins": config.fill_plugins,
+        "override_languages": config.override_languages,
+        "stub_chrome_runtime": config.stub_chrome_runtime,
+        "permission_overrides": config.permission_overrides,
+        "grant_permissions": config.grant_permissions,
+        "permissions_origin": config.permissions_origin,
+        "current_page_id": state.current_page_id if state else None,
+    }
+
+
+@mcp.tool()
+async def export_playwright_context(ctx: Context) -> Dict[str, Any]:
+    """Export the current Playwright launch/context options and init script for reuse outside MCP."""
+
+    state = get_browser_state(ctx)
+    headers = _build_extra_headers(config)
+    locale_value = config.locale or (config.languages[0] if config.languages else None)
+
+    launch_options: Dict[str, Any] = {
+        "headless": config.headless,
+    }
+    if config.channel:
+        launch_options["channel"] = config.channel
+
+    context_options: Dict[str, Any] = {}
+    if config.override_viewport:
+        context_options["viewport"] = {
+            "width": config.viewport_width,
+            "height": config.viewport_height,
+        }
+        if config.device_scale_factor is not None:
+            context_options["device_scale_factor"] = config.device_scale_factor
+            context_options.setdefault(
+                "screen",
+                {"width": config.viewport_width, "height": config.viewport_height},
+            )
+    if config.user_agent:
+        context_options["user_agent"] = config.user_agent
+    if locale_value:
+        context_options["locale"] = locale_value
+    if config.timezone_id:
+        context_options["timezone_id"] = config.timezone_id
+    if headers:
+        context_options["extra_http_headers"] = headers
+    if config.grant_permissions:
+        context_options["permissions"] = config.grant_permissions
+
+    init_script = _build_context_init_script(config) or ""
+
+    js_snippet = f"""// Launch
+const {{ chromium }} = require('playwright');
+(async () => {{
+  const browser = await chromium.launch({json.dumps(launch_options, indent=2)});
+  const context = await browser.newContext({json.dumps(context_options, indent=2)});
+  {'await context.addInitScript(`' + init_script.replace('`', '\\`') + '`);' if init_script else '// No init script applied'}
+  const page = await context.newPage();
+  // ... your automation here ...
+  await browser.close();
+}})();
+"""
+
+    py_snippet = f"""# Launch
+from playwright.sync_api import sync_playwright
+
+with sync_playwright() as p:
+    browser = p.chromium.launch({json.dumps(launch_options, indent=2)})
+    context = browser.new_context({json.dumps(context_options, indent=2)})
+    {"context.add_init_script('''" + init_script.replace("'''", "''") + "''')" if init_script else "# No init script applied"}
+    page = context.new_page()
+    # ... your automation here ...
+    browser.close()
+"""
+
+    return {
+        "launch_options": launch_options,
+        "context_options": context_options,
+        "init_script": init_script,
+        "flags": {
+            "stealth": config.stealth,
+            "mask_devtools": config.mask_devtools,
+            "force_devtools_closed": config.force_devtools_closed,
+            "apply_cdp_patch": config.apply_cdp_patch,
+            "fill_plugins": config.fill_plugins,
+            "override_languages": config.override_languages,
+            "stub_chrome_runtime": config.stub_chrome_runtime,
+            "override_viewport": config.override_viewport,
+        },
+        "example_js": js_snippet,
+        "example_python": py_snippet,
+        "current_page_id": state.current_page_id if state else None,
+    }
 
 
 # Navigation Tools
@@ -4060,6 +4301,12 @@ def main():
         help="Disable devtools/CDP masking when using --stealth",
     )
     parser.add_argument(
+        "--antidetect-preset",
+        dest="antidetect_preset",
+        choices=sorted(ANTIDETECT_PRESETS.keys()),
+        help="Opt-in anti-detect fingerprint preset (e.g., pixelscan)",
+    )
+    parser.add_argument(
         "--init-script",
         dest="init_script",
         help="Path to a JS file injected with add_init_script before any page scripts run",
@@ -4083,12 +4330,17 @@ def main():
     )
 
     args = parser.parse_args()
+    preset = _get_antidetect_preset(args.antidetect_preset)
 
     # Update global configuration
     config.headless = not args.headed
+    if preset and "headless" in preset:
+        config.headless = preset["headless"]
     config.browser_type = args.browser
     config.timeout = args.timeout
     config.channel = args.channel
+    if preset and "channel" in preset:
+        config.channel = preset["channel"]
     config.user_data_dir = getattr(args, "user_data_dir", None)
     config.max_elements_returned = args.max_elements
     config.max_element_text_length = args.max_element_text_length
@@ -4102,37 +4354,60 @@ def main():
     config.artifact_max_age_seconds = max(args.artifact_max_age_seconds, 0)
     config.artifact_max_files = args.artifact_max_files
     config.artifact_chunk_size = max(args.artifact_chunk_size, 256)
-    config.user_agent = args.user_agent
-    config.accept_language = args.accept_language
-    config.languages = _parse_csv_list(args.languages)
-    config.locale = args.locale
-    config.timezone_id = args.timezone_id
-    config.device_scale_factor = args.device_scale_factor
-    config.platform = args.platform
-    config.vendor = args.vendor
-    config.hardware_concurrency = args.hardware_concurrency
-    config.device_memory = args.device_memory
-    config.sec_ch_ua = args.sec_ch_ua
-    config.sec_ch_ua_mobile = args.sec_ch_ua_mobile
-    config.sec_ch_ua_platform = args.sec_ch_ua_platform
-    config.sec_ch_ua_platform_version = args.sec_ch_ua_platform_version
-    config.sec_ch_ua_full_version_list = args.sec_ch_ua_full_version_list
-    config.stealth = args.stealth
-    config.mask_devtools = (args.stealth and not args.no_stealth_devtools) or args.stealth_devtools
-    config.grant_permissions = _parse_csv_list(args.grant_permissions)
-    config.permissions_origin = args.permissions_origin
-    config.permission_overrides = {}
-    for entry in args.permission_states or []:
-        if "=" not in entry:
-            logger.warning("Ignoring permission override without '=': %s", entry)
-            continue
-        name, state = entry.split("=", 1)
-        name = name.strip()
-        state = state.strip()
-        if not name or not state:
-            logger.warning("Ignoring malformed permission override: %s", entry)
-            continue
-        config.permission_overrides[name] = state
+    # Apply opt-in preset first so explicit flags can override it.
+    _apply_antidetect_preset(preset)
+
+    # User overrides take precedence over preset values.
+    if args.user_agent is not None:
+        config.user_agent = args.user_agent
+    if args.accept_language is not None:
+        config.accept_language = args.accept_language
+    if args.languages is not None:
+        config.languages = _parse_csv_list(args.languages)
+    if args.locale is not None:
+        config.locale = args.locale
+    if args.timezone_id is not None:
+        config.timezone_id = args.timezone_id
+    if args.device_scale_factor is not None:
+        config.device_scale_factor = args.device_scale_factor
+    if args.platform is not None:
+        config.platform = args.platform
+    if args.vendor is not None:
+        config.vendor = args.vendor
+    if args.hardware_concurrency is not None:
+        config.hardware_concurrency = args.hardware_concurrency
+    if args.device_memory is not None:
+        config.device_memory = args.device_memory
+    if args.sec_ch_ua is not None:
+        config.sec_ch_ua = args.sec_ch_ua
+    if args.sec_ch_ua_mobile is not None:
+        config.sec_ch_ua_mobile = args.sec_ch_ua_mobile
+    if args.sec_ch_ua_platform is not None:
+        config.sec_ch_ua_platform = args.sec_ch_ua_platform
+    if args.sec_ch_ua_platform_version is not None:
+        config.sec_ch_ua_platform_version = args.sec_ch_ua_platform_version
+    if args.sec_ch_ua_full_version_list is not None:
+        config.sec_ch_ua_full_version_list = args.sec_ch_ua_full_version_list
+    if args.stealth or args.stealth_devtools or args.no_stealth_devtools:
+        config.stealth = args.stealth
+        config.mask_devtools = (args.stealth and not args.no_stealth_devtools) or args.stealth_devtools
+    if args.grant_permissions is not None:
+        config.grant_permissions = _parse_csv_list(args.grant_permissions)
+    if args.permissions_origin is not None:
+        config.permissions_origin = args.permissions_origin
+    if args.permission_states:
+        config.permission_overrides = {}
+        for entry in args.permission_states or []:
+            if "=" not in entry:
+                logger.warning("Ignoring permission override without '=': %s", entry)
+                continue
+            name, state = entry.split("=", 1)
+            name = name.strip()
+            state = state.strip()
+            if not name or not state:
+                logger.warning("Ignoring malformed permission override: %s", entry)
+                continue
+            config.permission_overrides[name] = state
 
     if args.init_script:
         try:

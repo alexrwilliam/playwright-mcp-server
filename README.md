@@ -108,6 +108,13 @@ playwright-mcp stdio --channel chrome-dev
 - Permission shaping: `--grant-permissions geolocation,clipboard-read --permission-state notifications=granted` pre-grants context permissions and overrides `navigator.permissions.query` responses.
 - Example: `playwright-mcp stdio --stealth --user-agent "Mozilla/5.0 ..." --sec-ch-ua "\"Chromium\";v=\"122\", \"Google Chrome\";v=\"122\"" --languages en-US,en --platform MacIntel --vendor "Google Inc." --hardware-concurrency 8 --device-memory 8 --device-scale-factor 2`.
 
+### Anti-detect presets (opt-in)
+
+- Use a preset at startup: `--antidetect-preset pixelscan` (opt-in, does not change defaults).
+- Apply at runtime via tools: `apply_antidetect_preset(preset="pixelscan")` or `recreate_context(antidetect_preset="pixelscan")`.
+- What `pixelscan` does: headful, `stealth=True`, Chrome channel, CDP transport patch on; leaves viewport/language/chrome.runtime/plugins unspoofed; deletes `navigator.webdriver`; sets devtools sentinels to “closed”; uses native UA/CH/TZ unless overridden.
+- Validation (live, optional): `PIXELSCAN_RUN=1 PIXELSCAN_PRESET=pixelscan venv/bin/python -m pytest -s tests/test_pixelscan_botcheck.py` (hits pixelscan.net/bot-check).
+
 ### Integration with Claude Desktop
 
 Add to your `claude_desktop_config.json`:
