@@ -290,6 +290,7 @@ class Config:
         override_viewport: bool = True,
         force_devtools_closed: bool = True,
         apply_cdp_patch: bool = False,
+        disable_blink_automation: bool = False,
     ):
         self.headless = headless
         self.browser_type = browser_type
@@ -340,6 +341,7 @@ class Config:
         self.override_viewport = override_viewport
         self.force_devtools_closed = force_devtools_closed
         self.apply_cdp_patch = apply_cdp_patch
+        self.disable_blink_automation = disable_blink_automation
 
 
 # Global configuration
@@ -370,7 +372,31 @@ ANTIDETECT_PRESETS: Dict[str, Dict[str, Any]] = {
         "force_devtools_closed": True,
         # Apply CDP transport patch to reduce control-channel fingerprints.
         "apply_cdp_patch": True,
-    }
+    },
+    "clearance-safe": {
+        # Purpose-built for headed Turnstile/WAF clearance; minimal spoofing.
+        "headless": False,
+        "browser_type": "chromium",
+        "channel": "chrome",
+        # Keep automation markers stripped without full stealth shims.
+        "disable_blink_automation": True,
+        "stealth": False,
+        "apply_cdp_patch": False,
+        # Stable viewport for clearance flows.
+        "viewport_width": 1366,
+        "viewport_height": 900,
+        "override_viewport": True,
+        # Stable UA + locale headers only; leave client hints/userAgentData native.
+        "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "accept_language": "en-US,en;q=0.9",
+        "languages": [],
+        "locale": "en-US",
+        # Avoid stealth helpers that can trip widgets.
+        "fill_plugins": False,
+        "stub_chrome_runtime": False,
+        "override_languages": False,
+        "force_devtools_closed": False,
+    },
 }
 _restart_lock = asyncio.Lock()
 
@@ -465,6 +491,9 @@ async def _create_browser_state() -> BrowserState:
     context = None
 
     context_options: Dict[str, Any] = {}
+    disable_blink_flag = config.browser_type == "chromium" and (
+        config.stealth or config.disable_blink_automation
+    )
     if config.override_viewport:
         context_options["viewport"] = {
             "width": config.viewport_width,
@@ -498,9 +527,12 @@ async def _create_browser_state() -> BrowserState:
             }
             if config.channel:
                 launch_options["channel"] = config.channel
-            if config.browser_type == "chromium" and config.stealth:
-                launch_options["ignore_default_args"] = ["--enable-automation"]
-                extra_args = launch_options.get("args", [])
+            if disable_blink_flag:
+                existing_ignored = list(launch_options.get("ignore_default_args") or [])
+                if "--enable-automation" not in existing_ignored:
+                    existing_ignored.append("--enable-automation")
+                launch_options["ignore_default_args"] = existing_ignored
+                extra_args = list(launch_options.get("args", []))
                 if "--disable-blink-features=AutomationControlled" not in extra_args:
                     extra_args.append("--disable-blink-features=AutomationControlled")
                 launch_options["args"] = extra_args
@@ -525,9 +557,12 @@ async def _create_browser_state() -> BrowserState:
             launch_options = {"headless": config.headless}
             if config.channel:
                 launch_options["channel"] = config.channel
-            if config.browser_type == "chromium" and config.stealth:
-                launch_options["ignore_default_args"] = ["--enable-automation"]
-                extra_args = launch_options.get("args", [])
+            if disable_blink_flag:
+                existing_ignored = list(launch_options.get("ignore_default_args") or [])
+                if "--enable-automation" not in existing_ignored:
+                    existing_ignored.append("--enable-automation")
+                launch_options["ignore_default_args"] = existing_ignored
+                extra_args = list(launch_options.get("args", []))
                 if "--disable-blink-features=AutomationControlled" not in extra_args:
                     extra_args.append("--disable-blink-features=AutomationControlled")
                 launch_options["args"] = extra_args

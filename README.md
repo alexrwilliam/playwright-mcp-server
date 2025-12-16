@@ -110,9 +110,10 @@ playwright-mcp stdio --channel chrome-dev
 
 ### Anti-detect presets (opt-in)
 
-- Use a preset at startup: `--antidetect-preset pixelscan` (opt-in, does not change defaults).
-- Apply at runtime via tools: `apply_antidetect_preset(preset="pixelscan")` or `recreate_context(antidetect_preset="pixelscan")`.
-- What `pixelscan` does: headful, `stealth=True`, Chrome channel, CDP transport patch on; leaves viewport/language/chrome.runtime/plugins unspoofed; deletes `navigator.webdriver`; sets devtools sentinels to “closed”; uses native UA/CH/TZ unless overridden.
+- Use a preset at startup: `--antidetect-preset pixelscan` or `--antidetect-preset clearance-safe` (opt-in, does not change defaults).
+- Apply at runtime via tools: `apply_antidetect_preset(preset="pixelscan")` / `apply_antidetect_preset(preset="clearance-safe")` or `recreate_context(antidetect_preset="...")`.
+- `clearance-safe`: headed Chrome channel, removes only Playwright automation flags (`--disable-blink-features=AutomationControlled` + `--enable-automation` stripped), fixed viewport 1366x900, UA `Chrome/120` on macOS with `Accept-Language: en-US,en;q=0.9` and locale `en-US`, no stealth/CDP patch, leaves client hints and userAgentData native, no plugin/runtime stubs or devtools masking. Reserve this for Turnstile/WAF clearance runs.
+- `pixelscan`: headful, `stealth=True`, Chrome channel, CDP transport patch on; leaves viewport/language/chrome.runtime/plugins unspoofed; deletes `navigator.webdriver`; sets devtools sentinels to “closed”; uses native UA/CH/TZ unless overridden.
 - Validation (live, optional): `PIXELSCAN_RUN=1 PIXELSCAN_PRESET=pixelscan venv/bin/python -m pytest -s tests/test_pixelscan_botcheck.py` (hits pixelscan.net/bot-check).
 
 ### Integration with Claude Desktop
