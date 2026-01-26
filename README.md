@@ -216,6 +216,7 @@ Tweak the caps per run with `--max-response-chars`, `--preview-chars`, and `--ar
 - `get_html()` - Get page HTML
 - `get_accessibility_snapshot(interesting_only: bool = True, root_selector: str | None = None, max_nodes: int | None = None)` - Get accessibility tree with optional filters and per-call node caps
 - Accessibility snapshots are pruned to the configured node budget, accept per-call overrides, and include `truncated`, `max_nodes`, and `node_count` metadata.
+- When Playwright lacks `page.accessibility`, the tool falls back to `locator.aria_snapshot()` and returns `format: "aria_snapshot"` (node counts are estimated).
 - `screenshot(selector: str | None = None, full_page: bool = False, inline: bool = False)` - Capture page or element; stores the PNG as an artifact with metadata previews by default
 - `pdf(inline: bool = False)` - Generate a PDF and return artifact metadata unless inline mode is explicitly requested
 

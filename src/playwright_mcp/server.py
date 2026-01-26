@@ -1136,6 +1136,18 @@ def _count_accessibility_nodes(node: Optional[Dict[str, Any]]) -> int:
     return total
 
 
+def _count_aria_snapshot_nodes(snapshot: Optional[str]) -> int:
+    if not snapshot:
+        return 0
+    count = 0
+    for line in snapshot.splitlines():
+        if line.lstrip().startswith("- "):
+            count += 1
+    if count == 0 and snapshot.strip():
+        return 1
+    return count
+
+
 def _prune_accessibility_snapshot(
     snapshot: Optional[Dict[str, Any]], max_nodes: int
 ) -> Tuple[Optional[Dict[str, Any]], bool, int]:
@@ -2637,15 +2649,61 @@ async def get_accessibility_snapshot(
                     "selector": root_selector,
                 }
 
-        snapshot = await page.accessibility.snapshot(
-            interesting_only=interesting_only,
-            root=root_element,
-        )
+        accessibility = getattr(page, "accessibility", None)
+        if accessibility and hasattr(accessibility, "snapshot"):
+            snapshot = await accessibility.snapshot(
+                interesting_only=interesting_only,
+                root=root_element,
+            )
 
-        node_limit = _resolve_limit(config.max_accessibility_nodes, max_nodes)
-        pruned_snapshot, node_truncated, node_count = _prune_accessibility_snapshot(
-            snapshot, node_limit
+            node_limit = _resolve_limit(config.max_accessibility_nodes, max_nodes)
+            pruned_snapshot, node_truncated, node_count = _prune_accessibility_snapshot(
+                snapshot, node_limit
+            )
+
+            (
+                budgeted_snapshot,
+                budget_truncated,
+                preview,
+                overflow_path,
+                original_size,
+            ) = _apply_response_budget(
+                pruned_snapshot,
+                budget=config.max_response_characters,
+                preview_limit=config.preview_characters,
+                label="accessibility_snapshot",
+            )
+
+            result: Dict[str, Any] = {
+                "success": True,
+                "snapshot": budgeted_snapshot,
+                "node_count": node_count,
+                "interesting_only": interesting_only,
+                "format": "accessibility_snapshot",
+            }
+
+            if root_selector:
+                result["root_selector"] = root_selector
+
+            if node_truncated:
+                result["truncated"] = True
+                result["max_nodes"] = node_limit
+
+            if budget_truncated:
+                result["truncated"] = True
+                result["preview"] = preview
+                if overflow_path:
+                    result["overflow_path"] = overflow_path
+                result["overflow_characters"] = original_size
+
+            return result
+
+        # Fallback for newer Playwright versions where page.accessibility is removed.
+        locator = (
+            page.locator(root_selector).first if root_selector else page.locator("html").first
         )
+        snapshot = await locator.aria_snapshot()
+        node_count = _count_aria_snapshot_nodes(snapshot)
 
         (
             budgeted_snapshot,
@@ -2654,25 +2712,22 @@ async def get_accessibility_snapshot(
             overflow_path,
             original_size,
         ) = _apply_response_budget(
-            pruned_snapshot,
+            snapshot,
             budget=config.max_response_characters,
             preview_limit=config.preview_characters,
-            label="accessibility_snapshot",
+            label="aria_snapshot",
         )
 
-        result: Dict[str, Any] = {
+        result = {
             "success": True,
             "snapshot": budgeted_snapshot,
             "node_count": node_count,
             "interesting_only": interesting_only,
+            "format": "aria_snapshot",
         }
 
         if root_selector:
             result["root_selector"] = root_selector
-
-        if node_truncated:
-            result["truncated"] = True
-            result["max_nodes"] = node_limit
 
         if budget_truncated:
             result["truncated"] = True
