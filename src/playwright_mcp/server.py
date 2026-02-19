@@ -13,6 +13,7 @@ import sys
 import time
 import uuid
 import random
+import pprint
 
 from playwright_mcp import cdp_patch
 from collections import deque
@@ -20,8 +21,9 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Deque, Dict, List, Optional, Tuple, Union
+from typing import Any, Deque, Dict, List, Optional, Set, Tuple, Union
 from urllib.parse import urlparse, parse_qs
+import urllib.request
 
 from mcp.server.fastmcp import Context, FastMCP
 from playwright.async_api import (
@@ -40,6 +42,7 @@ from pydantic import BaseModel, Field
 logger = logging.getLogger(__name__)
 
 MAX_STORED_RESPONSE_HANDLES = 500
+DEFAULT_CDP_ENDPOINT = "http://127.0.0.1:1234/json/version"
 
 
 @dataclass
@@ -54,12 +57,16 @@ class BrowserState:
     # Page management
     pages: Dict[str, Page] = None  # Maps page ID to Page object
     current_page_id: str = None  # ID of the current active page
+    cdp_attached: bool = False
+    cdp_created_context: bool = False
+    cdp_close_browser: bool = False
 
     # Network monitoring state
     captured_requests: List[Dict[str, Any]] = None
     captured_responses: List[Dict[str, Any]] = None
     response_handles: Dict[str, Response] = None
     response_handle_order: Deque[str] = None
+    monitored_page_refs: Set[str] = None
 
     def __post_init__(self):
         if self.pages is None:
@@ -72,6 +79,8 @@ class BrowserState:
             self.response_handles = {}
         if self.response_handle_order is None:
             self.response_handle_order = deque()
+        if self.monitored_page_refs is None:
+            self.monitored_page_refs = set()
 
     def get_current_page(self) -> Page:
         """Get the current active page."""
@@ -253,6 +262,9 @@ class Config:
         viewport_height: int = 1080,
         channel: Optional[str] = None,
         user_data_dir: Optional[str] = None,
+        cdp_endpoint: Optional[str] = None,
+        cdp_use_existing_context: bool = True,
+        cdp_close_browser: bool = False,
         max_elements_returned: int = 20,
         max_element_text_length: int = 2000,
         max_accessibility_nodes: int = 500,
@@ -299,6 +311,9 @@ class Config:
         self.viewport_height = viewport_height
         self.channel = channel
         self.user_data_dir = user_data_dir
+        self.cdp_endpoint = cdp_endpoint
+        self.cdp_use_existing_context = cdp_use_existing_context
+        self.cdp_close_browser = cdp_close_browser
         self.max_elements_returned = max_elements_returned
         self.max_element_text_length = max_element_text_length
         self.max_accessibility_nodes = max_accessibility_nodes
@@ -432,15 +447,59 @@ def _apply_antidetect_preset(preset: Optional[Dict[str, Any]]):
         config.apply_cdp_patch = preset["apply_cdp_patch"]
 
 
-async def _shutdown_browser_state(state: Optional[BrowserState]):
+def _resolve_cdp_ws_endpoint(endpoint: str) -> str:
+    """Accept http(s) json/version or ws/wss and return websocket endpoint."""
+    if endpoint.startswith("ws://") or endpoint.startswith("wss://"):
+        return endpoint
+    with urllib.request.urlopen(endpoint, timeout=5) as resp:  # nosec B310 - user-provided local devtools endpoint
+        data = json.loads(resp.read().decode("utf-8"))
+    ws_endpoint = data.get("webSocketDebuggerUrl") if isinstance(data, dict) else None
+    if not ws_endpoint:
+        raise RuntimeError(f"Could not resolve webSocketDebuggerUrl from {endpoint}")
+    return ws_endpoint
+
+
+def _playwright_object_guid(obj: Any) -> Optional[str]:
+    impl = getattr(obj, "_impl_obj", None)
+    return getattr(impl, "_guid", None)
+
+
+def _is_same_playwright_object(left: Any, right: Any) -> bool:
+    if left is None or right is None:
+        return False
+    if left is right:
+        return True
+    left_guid = _playwright_object_guid(left)
+    right_guid = _playwright_object_guid(right)
+    return bool(left_guid and right_guid and left_guid == right_guid)
+
+
+async def _shutdown_browser_state(
+    state: Optional[BrowserState],
+    *,
+    preserve_context: Optional[BrowserContext] = None,
+    preserve_browser: Optional[Browser] = None,
+    close_attached_browser: bool = True,
+):
     """Close browser/context and stop Playwright for a given state."""
     if not state:
         return
 
     try:
-        if state.context:
+        if (
+            state.context
+            and not _is_same_playwright_object(state.context, preserve_context)
+            and (not state.cdp_attached or state.cdp_created_context)
+        ):
             await state.context.close()
-        elif state.browser:
+        if (
+            state.browser
+            and not _is_same_playwright_object(state.browser, preserve_browser)
+            and (
+                not state.cdp_attached
+                or (state.cdp_close_browser and close_attached_browser)
+            )
+        ):
             await state.browser.close()
     except Exception as exc:
         logger.error("Error closing browser: %s", exc)
@@ -486,9 +545,12 @@ async def _create_browser_state() -> BrowserState:
 
     playwright = await async_playwright().start()
 
-    use_persistent_context = config.user_data_dir is not None
+    use_cdp_attach = bool(config.cdp_endpoint)
+    use_persistent_context = (config.user_data_dir is not None) and not use_cdp_attach
     browser = None
     context = None
+    cdp_attached = False
+    cdp_created_context = False
 
     context_options: Dict[str, Any] = {}
     disable_blink_flag = config.browser_type == "chromium" and (
@@ -520,7 +582,38 @@ async def _create_browser_state() -> BrowserState:
         context_options["extra_http_headers"] = extra_headers
 
     try:
-        if use_persistent_context:
+        if use_cdp_attach:
+            if config.browser_type != "chromium":
+                raise ValueError("CDP attach mode only supports --browser chromium")
+
+            ws_endpoint = _resolve_cdp_ws_endpoint(config.cdp_endpoint or "")
+            browser = await playwright.chromium.connect_over_cdp(ws_endpoint)
+            cdp_attached = True
+
+            if config.user_data_dir:
+                logger.warning("Ignoring user_data_dir while CDP attach mode is active.")
+            if config.channel:
+                logger.warning("Ignoring browser channel while CDP attach mode is active.")
+
+            if browser.contexts and config.cdp_use_existing_context:
+                context = browser.contexts[0]
+                if context_options.get("extra_http_headers"):
+                    try:
+                        await context.set_extra_http_headers(context_options["extra_http_headers"])
+                    except Exception as exc:
+                        logger.debug("Failed to apply extra headers to reused CDP context: %s", exc)
+                if any(
+                    key in context_options
+                    for key in ("viewport", "device_scale_factor", "screen", "user_agent", "locale", "timezone_id")
+                ):
+                    logger.warning(
+                        "Reusing existing CDP context: viewport/UA/locale/timezone overrides may not apply. "
+                        "Use --no-cdp-use-existing-context to force a new context."
+                    )
+            else:
+                context = await browser.new_context(**context_options)
+                cdp_created_context = True
+        elif use_persistent_context:
             launch_options = {
                 "headless": config.headless,
                 **context_options,
@@ -580,17 +673,31 @@ async def _create_browser_state() -> BrowserState:
 
         await _prepare_context(context)
 
-        page = context.pages[0] if context.pages else await context.new_page()
+        existing_pages = list(context.pages)
+        for existing_page in existing_pages:
+            existing_page.set_default_timeout(config.timeout)
 
-        page.set_default_timeout(config.timeout)
+        if existing_pages:
+            page = existing_pages[0]
+        else:
+            page = await context.new_page()
+            page.set_default_timeout(config.timeout)
+            existing_pages = [page]
 
         state = BrowserState(
             playwright=playwright, browser=browser, context=context, page=page
         )
+        state.cdp_attached = cdp_attached
+        state.cdp_created_context = cdp_created_context
+        state.cdp_close_browser = bool(config.cdp_close_browser)
 
-        page_id = str(uuid.uuid4())
-        state.pages[page_id] = page
-        state.current_page_id = page_id
+        for tracked_page in existing_pages:
+            page_id = str(uuid.uuid4())
+            state.pages[page_id] = tracked_page
+            if tracked_page is page:
+                state.current_page_id = page_id
+        if not state.current_page_id and state.pages:
+            state.current_page_id = next(iter(state.pages))
 
         await _setup_page_tracking(state)
         await _setup_network_monitoring(state)
@@ -600,9 +707,9 @@ async def _create_browser_state() -> BrowserState:
     except Exception:
         # Best-effort cleanup on failure
         try:
-            if context:
+            if context and (not cdp_attached or cdp_created_context):
                 await context.close()
-            elif browser:
+            if browser and not cdp_attached:
                 await browser.close()
         except Exception:
             pass
@@ -1018,6 +1125,11 @@ async def _setup_page_tracking(state: BrowserState):
     async def handle_new_page(page: Page):
         """Handle new page/tab creation."""
         try:
+            for existing_id, existing_page in state.pages.items():
+                if _is_same_playwright_object(existing_page, page):
+                    logger.debug("Ignoring duplicate page event for tracked page ID: %s", existing_id)
+                    return
+
             # Generate unique ID for the new page
             page_id = str(uuid.uuid4())
 
@@ -1040,6 +1152,11 @@ async def _setup_page_tracking(state: BrowserState):
 
 async def _setup_network_monitoring_for_page(state: BrowserState, page: Page):
     """Set up network monitoring for a specific page."""
+    page_ref = _playwright_object_guid(page) or f"page:{id(page)}"
+    if page_ref in state.monitored_page_refs:
+        return
+    state.monitored_page_refs.add(page_ref)
+
     async def handle_request(request: Request):
         """Capture request details."""
         try:
@@ -1084,7 +1201,18 @@ async def _setup_network_monitoring_for_page(state: BrowserState, page: Page):
 
 async def _setup_network_monitoring(state: BrowserState):
     """Set up network request and response monitoring for initial page."""
-    await _setup_network_monitoring_for_page(state, state.page)
+    tracked_pages = list(state.pages.values()) or [state.page]
+    deduped_pages: List[Page] = []
+    seen_refs: Set[str] = set()
+    for tracked_page in tracked_pages:
+        page_ref = _playwright_object_guid(tracked_page) or f"page:{id(tracked_page)}"
+        if page_ref in seen_refs:
+            continue
+        seen_refs.add(page_ref)
+        deduped_pages.append(tracked_page)
+
+    for tracked_page in deduped_pages:
+        await _setup_network_monitoring_for_page(state, tracked_page)
 
 
 def get_browser_state(ctx: Context) -> BrowserState:
@@ -1496,7 +1624,12 @@ async def restart_browser(
             return {"success": False, "headed": headed, "error": str(exc)}
 
         try:
-            await _shutdown_browser_state(state)
+            await _shutdown_browser_state(
+                state,
+                preserve_context=new_state.context,
+                preserve_browser=new_state.browser,
+                close_attached_browser=False,
+            )
         except Exception as exc:
             logger.warning("Error shutting down previous browser during restart: %s", exc)
 
@@ -1510,6 +1643,10 @@ async def restart_browser(
         state.captured_responses = new_state.captured_responses
         state.response_handles = new_state.response_handles
         state.response_handle_order = new_state.response_handle_order
+        state.monitored_page_refs = new_state.monitored_page_refs
+        state.cdp_attached = new_state.cdp_attached
+        state.cdp_created_context = new_state.cdp_created_context
+        state.cdp_close_browser = new_state.cdp_close_browser
 
         return {
             "success": True,
@@ -1549,12 +1686,15 @@ async def recreate_context(
     permission_overrides: Optional[Dict[str, str]] = None,
     viewport_width: Optional[int] = None,
     viewport_height: Optional[int] = None,
+    cdp_endpoint: Optional[str] = None,
+    cdp_use_existing_context: Optional[bool] = None,
+    cdp_close_browser: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """Recreate the browser context with new fingerprint/stealth/init-script settings.
 
     This closes the existing context and spins up a new one with the provided
     overrides applied at creation time (UA, client hints, languages/locale/timezone,
-    device metrics, permissions, stealth/devtools masking, and init scripts).
+    device metrics, permissions, stealth/devtools masking, init scripts, and CDP attach mode).
     """
     async with _restart_lock:
         state = get_browser_state(ctx)
@@ -1585,6 +1725,9 @@ async def recreate_context(
             "permissions_origin": config.permissions_origin,
             "viewport_width": config.viewport_width,
             "viewport_height": config.viewport_height,
+            "cdp_endpoint": config.cdp_endpoint,
+            "cdp_use_existing_context": config.cdp_use_existing_context,
+            "cdp_close_browser": config.cdp_close_browser,
         }
 
         preset = _get_antidetect_preset(antidetect_preset)
@@ -1633,6 +1776,13 @@ async def recreate_context(
             config.viewport_width = viewport_width
         if viewport_height is not None:
             config.viewport_height = viewport_height
+        if cdp_endpoint is not None:
+            normalized_cdp_endpoint = cdp_endpoint.strip()
+            config.cdp_endpoint = normalized_cdp_endpoint or None
+        if cdp_use_existing_context is not None:
+            config.cdp_use_existing_context = cdp_use_existing_context
+        if cdp_close_browser is not None:
+            config.cdp_close_browser = cdp_close_browser
 
         try:
             new_state = await _create_browser_state()
@@ -1644,7 +1794,12 @@ async def recreate_context(
             return {"success": False, "error": str(exc)}
 
         try:
-            await _shutdown_browser_state(state)
+            await _shutdown_browser_state(
+                state,
+                preserve_context=new_state.context,
+                preserve_browser=new_state.browser,
+                close_attached_browser=False,
+            )
         except Exception as exc:
             logger.warning("Error shutting down previous browser during recreate: %s", exc)
 
@@ -1658,6 +1813,10 @@ async def recreate_context(
         state.captured_responses = new_state.captured_responses
         state.response_handles = new_state.response_handles
         state.response_handle_order = new_state.response_handle_order
+        state.monitored_page_refs = new_state.monitored_page_refs
+        state.cdp_attached = new_state.cdp_attached
+        state.cdp_created_context = new_state.cdp_created_context
+        state.cdp_close_browser = new_state.cdp_close_browser
 
         applied = {
             "stealth": config.stealth,
@@ -1682,6 +1841,9 @@ async def recreate_context(
             "permission_overrides": config.permission_overrides,
             "viewport_width": config.viewport_width,
             "viewport_height": config.viewport_height,
+            "cdp_endpoint": config.cdp_endpoint,
+            "cdp_use_existing_context": config.cdp_use_existing_context,
+            "cdp_close_browser": config.cdp_close_browser,
             "custom_init_script": bool(config.custom_init_script),
             "headless": config.headless,
             "antidetect_preset": antidetect_preset,
@@ -1710,6 +1872,9 @@ async def get_effective_config(ctx: Context) -> Dict[str, Any]:
         "headless": config.headless,
         "browser_type": config.browser_type,
         "channel": config.channel,
+        "cdp_endpoint": config.cdp_endpoint,
+        "cdp_use_existing_context": config.cdp_use_existing_context,
+        "cdp_close_browser": config.cdp_close_browser,
         "stealth": config.stealth,
         "mask_devtools": config.mask_devtools,
         "force_devtools_closed": config.force_devtools_closed,
@@ -1749,6 +1914,7 @@ async def export_playwright_context(ctx: Context) -> Dict[str, Any]:
     state = get_browser_state(ctx)
     headers = _build_extra_headers(config)
     locale_value = config.locale or (config.languages[0] if config.languages else None)
+    browser_accessor = config.browser_type
 
     launch_options: Dict[str, Any] = {
         "headless": config.headless,
@@ -1779,27 +1945,124 @@ async def export_playwright_context(ctx: Context) -> Dict[str, Any]:
     if config.grant_permissions:
         context_options["permissions"] = config.grant_permissions
 
-    init_script = _build_context_init_script(config) or ""
+    persistent_context_options: Dict[str, Any] = {
+        **launch_options,
+        **context_options,
+    }
 
-    js_snippet = f"""// Launch
-const {{ chromium }} = require('playwright');
+    js_option_key_map = {
+        "device_scale_factor": "deviceScaleFactor",
+        "user_agent": "userAgent",
+        "timezone_id": "timezoneId",
+        "extra_http_headers": "extraHTTPHeaders",
+        "ignore_default_args": "ignoreDefaultArgs",
+    }
+
+    def to_js_options(options: Dict[str, Any]) -> Dict[str, Any]:
+        converted: Dict[str, Any] = {}
+        for key, value in options.items():
+            converted[js_option_key_map.get(key, key)] = value
+        return converted
+
+    js_launch_options = to_js_options(launch_options)
+    js_context_options = to_js_options(context_options)
+    js_persistent_context_options = to_js_options(persistent_context_options)
+    py_launch_options = pprint.pformat(launch_options, width=88)
+    py_context_options = pprint.pformat(context_options, width=88)
+    py_persistent_context_options = pprint.pformat(persistent_context_options, width=88)
+
+    init_script = _build_context_init_script(config) or ""
+    js_init_line = "// No init script applied"
+    py_init_line = "# No init script applied"
+    if init_script:
+        js_escaped_init = init_script.replace("`", "\\`")
+        py_escaped_init = init_script.replace("'''", "''")
+        js_init_line = f"await context.addInitScript(`{js_escaped_init}`);"
+        py_init_line = f"context.add_init_script('''{py_escaped_init}''')"
+
+    if config.cdp_endpoint:
+        js_snippet = f"""// Connect over CDP
+const playwright = require('playwright');
 (async () => {{
-  const browser = await chromium.launch({json.dumps(launch_options, indent=2)});
-  const context = await browser.newContext({json.dumps(context_options, indent=2)});
-  {'await context.addInitScript(`' + init_script.replace('`', '\\`') + '`);' if init_script else '// No init script applied'}
+  const browser = await playwright.chromium.connectOverCDP({json.dumps(config.cdp_endpoint)});
+  const contextOptions = {json.dumps(js_context_options, indent=2)};
+  const context = (browser.contexts().length && {str(config.cdp_use_existing_context).lower()})
+    ? browser.contexts()[0]
+    : await browser.newContext(contextOptions);
+  {js_init_line}
+  const page = context.pages().length ? context.pages()[0] : await context.newPage();
+  // ... your automation here ...
+  {('await browser.close();' if config.cdp_close_browser else '// Browser left open because cdp_close_browser is false')}
+}})();
+"""
+        py_snippet = f"""# Connect over CDP
+from playwright.sync_api import sync_playwright
+
+with sync_playwright() as p:
+    browser = p.chromium.connect_over_cdp({json.dumps(config.cdp_endpoint)})
+    context_options = {py_context_options}
+    if browser.contexts and {str(config.cdp_use_existing_context)}:
+        context = browser.contexts[0]
+    else:
+        context = browser.new_context(**context_options)
+    {py_init_line}
+    page = context.pages[0] if context.pages else context.new_page()
+    # ... your automation here ...
+    {("browser.close()" if config.cdp_close_browser else "# Browser left open because cdp_close_browser is false")}
+"""
+    elif config.user_data_dir:
+        js_snippet = f"""// Launch persistent context
+const playwright = require('playwright');
+(async () => {{
+  const persistentContextOptions = {json.dumps(js_persistent_context_options, indent=2)};
+  const context = await playwright.{browser_accessor}.launchPersistentContext(
+    {json.dumps(config.user_data_dir)},
+    persistentContextOptions
+  );
+  {js_init_line}
+  const page = context.pages().length ? context.pages()[0] : await context.newPage();
+  // ... your automation here ...
+  await context.close();
+}})();
+"""
+        py_snippet = f"""# Launch persistent context
+from playwright.sync_api import sync_playwright
+
+with sync_playwright() as p:
+    persistent_context_options = {py_persistent_context_options}
+    context = p.{browser_accessor}.launch_persistent_context(
+        {json.dumps(config.user_data_dir)},
+        **persistent_context_options,
+    )
+    {py_init_line}
+    page = context.pages[0] if context.pages else context.new_page()
+    # ... your automation here ...
+    context.close()
+"""
+    else:
+        js_snippet = f"""// Launch
+const playwright = require('playwright');
+(async () => {{
+  const launchOptions = {json.dumps(js_launch_options, indent=2)};
+  const contextOptions = {json.dumps(js_context_options, indent=2)};
+  const browser = await playwright.{browser_accessor}.launch(launchOptions);
+  const context = await browser.newContext(contextOptions);
+  {js_init_line}
   const page = await context.newPage();
   // ... your automation here ...
   await browser.close();
 }})();
 """
 
-    py_snippet = f"""# Launch
+        py_snippet = f"""# Launch
 from playwright.sync_api import sync_playwright
 
 with sync_playwright() as p:
-    browser = p.chromium.launch({json.dumps(launch_options, indent=2)})
-    context = browser.new_context({json.dumps(context_options, indent=2)})
-    {"context.add_init_script('''" + init_script.replace("'''", "''") + "''')" if init_script else "# No init script applied"}
+    launch_options = {py_launch_options}
+    context_options = {py_context_options}
+    browser = p.{browser_accessor}.launch(**launch_options)
+    context = browser.new_context(**context_options)
+    {py_init_line}
     page = context.new_page()
     # ... your automation here ...
     browser.close()
@@ -1814,6 +2077,9 @@ with sync_playwright() as p:
             "mask_devtools": config.mask_devtools,
             "force_devtools_closed": config.force_devtools_closed,
             "apply_cdp_patch": config.apply_cdp_patch,
+            "cdp_endpoint": config.cdp_endpoint,
+            "cdp_use_existing_context": config.cdp_use_existing_context,
+            "cdp_close_browser": config.cdp_close_browser,
             "fill_plugins": config.fill_plugins,
             "override_languages": config.override_languages,
             "stub_chrome_runtime": config.stub_chrome_runtime,
@@ -4258,6 +4524,43 @@ def main():
         help="Path to Chrome user data directory (enables persistent context with your profile)",
     )
     parser.add_argument(
+        "--cdp-endpoint",
+        nargs="?",
+        metavar="ENDPOINT",
+        const=DEFAULT_CDP_ENDPOINT,
+        type=str,
+        help=(
+            "Enable CDP attach mode. If ENDPOINT is omitted, defaults to "
+            f"{DEFAULT_CDP_ENDPOINT}. If this flag is not provided, MCP runs in normal launch mode."
+        ),
+    )
+    parser.add_argument(
+        "--cdp-use-existing-context",
+        dest="cdp_use_existing_context",
+        action="store_true",
+        default=None,
+        help="When using --cdp-endpoint, reuse the first existing context if present (default: true)",
+    )
+    parser.add_argument(
+        "--no-cdp-use-existing-context",
+        dest="cdp_use_existing_context",
+        action="store_false",
+        help="When using --cdp-endpoint, always create a fresh context",
+    )
+    parser.add_argument(
+        "--cdp-close-browser",
+        dest="cdp_close_browser",
+        action="store_true",
+        default=None,
+        help="When using --cdp-endpoint, close the attached browser on shutdown/restart",
+    )
+    parser.add_argument(
+        "--no-cdp-close-browser",
+        dest="cdp_close_browser",
+        action="store_false",
+        help="When using --cdp-endpoint, leave the attached browser running (default)",
+    )
+    parser.add_argument(
         "--max-elements",
         type=int,
         default=config.max_elements_returned,
@@ -4449,6 +4752,11 @@ def main():
     if preset and "channel" in preset:
         config.channel = preset["channel"]
     config.user_data_dir = getattr(args, "user_data_dir", None)
+    config.cdp_endpoint = (args.cdp_endpoint.strip() if args.cdp_endpoint else None)
+    if args.cdp_use_existing_context is not None:
+        config.cdp_use_existing_context = args.cdp_use_existing_context
+    if args.cdp_close_browser is not None:
+        config.cdp_close_browser = args.cdp_close_browser
     config.max_elements_returned = args.max_elements
     config.max_element_text_length = args.max_element_text_length
     config.max_accessibility_nodes = args.max_accessibility_nodes

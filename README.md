@@ -86,6 +86,13 @@ playwright-mcp stdio --channel chrome
 # Use real Chrome with your profile (cookies, extensions, history)
 playwright-mcp stdio --channel chrome --user-data-dir "/Users/you/Library/Application Support/Google/Chrome"
 
+# Attach to an already-running real Chrome/Edge over CDP (useful when blocked/captcha-heavy)
+/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=1234 --user-data-dir=/tmp/pwmcp_cdp_profile
+playwright-mcp stdio --cdp-endpoint
+
+# Force a fresh context instead of reusing the first existing CDP context
+playwright-mcp stdio --cdp-endpoint --no-cdp-use-existing-context
+
 # Adjust response budgets (defaults: 4k inline, 400-char previews)
 playwright-mcp stdio --max-response-chars 6000 --preview-chars 600
 
@@ -103,6 +110,8 @@ playwright-mcp stdio --channel chrome-dev
 ### Stealth & Fingerprinting Controls
 
 - Built-in stealth preset: `--stealth` masks `navigator.webdriver`, stubs `chrome.runtime`, injects realistic plugins/mimeTypes, shims permissions, and masks devtools/CDP probes (disable the devtools masking with `--no-stealth-devtools`, or enable it standalone via `--stealth-devtools`).
+- CDP attach mode: `--cdp-endpoint [ENDPOINT]` enables CDP attach mode. If `ENDPOINT` is omitted, it defaults to `http://127.0.0.1:1234/json/version`. If this flag is not provided, MCP runs in normal launch mode. This is often more resilient when direct Playwright sessions are blocked or frequent captcha/WAF checks appear.
+- Runtime switch: use `recreate_context(cdp_endpoint="http://127.0.0.1:1234/json/version", cdp_use_existing_context=True)` to hot-switch into CDP mode, or pass `cdp_endpoint=""` to clear it and return to normal launch mode.
 - Init scripts: `--init-script ./hacks.js` injects your own JS via `context.add_init_script` before any page scripts execute.
 - Fingerprint knobs (applied at context creation): `--user-agent`, `--sec-ch-ua*`, `--accept-language`, `--languages`, `--locale`, `--timezone-id`, `--platform`, `--vendor`, `--hardware-concurrency`, `--device-memory`, `--device-scale-factor`, plus viewport flags already present.
 - Permission shaping: `--grant-permissions geolocation,clipboard-read --permission-state notifications=granted` pre-grants context permissions and overrides `navigator.permissions.query` responses.
@@ -279,10 +288,13 @@ All existing tools automatically work on the currently active page. When you swi
 
 The server accepts the following configuration options:
 
-- `--headed` / `--headless` - Run browser in headed or headless mode
+- `--headed` - Run browser in headed mode (headless is the default)
 - `--browser` - Browser type (chromium, firefox, webkit)
 - `--channel` - Browser channel (chrome, chrome-beta, msedge, etc.) for real browsers
 - `--user-data-dir` - Path to browser profile directory for persistent context
+- `--cdp-endpoint [ENDPOINT]` - Enable CDP attach mode. If `ENDPOINT` is omitted, defaults to `http://127.0.0.1:1234/json/version`; if the flag is not provided, MCP runs in normal launch mode (recommended when blocked or captcha-heavy)
+- `--cdp-use-existing-context` / `--no-cdp-use-existing-context` - Reuse first CDP context or force a new one
+- `--cdp-close-browser` / `--no-cdp-close-browser` - Control whether attached browser is closed on shutdown
 - `--port` - Port for HTTP transport
 - `--timeout` - Default timeout for operations (ms)
 - `--max-elements` - Maximum number of DOM nodes returned by query tools (default: 20)
