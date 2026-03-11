@@ -45,6 +45,89 @@ MAX_STORED_RESPONSE_HANDLES = 500
 DEFAULT_CDP_ENDPOINT = "http://127.0.0.1:1234/json/version"
 
 
+def _default_headless_mode() -> bool:
+    """Match Playwright CLI behavior: headed unless Linux has no DISPLAY."""
+    return sys.platform.startswith("linux") and not os.environ.get("DISPLAY")
+
+
+def _default_channel_for_browser(browser_type: str) -> Optional[str]:
+    """Prefer real Chrome for Chromium sessions to reduce automation fingerprints."""
+    if browser_type == "chromium":
+        return "chrome"
+    return None
+
+
+def _apply_default_headless_hardening(
+    cfg: "Config",
+    *,
+    force_stealth: bool = True,
+    force_mask_devtools: bool = True,
+    force_disable_blink_automation: bool = True,
+):
+    """Apply hardened anti-detect defaults when running in headless mode.
+
+    By default this promotes a safer baseline for headless browsing while allowing
+    call-sites to preserve explicit user overrides via the force_* switches.
+    """
+    if not cfg.headless:
+        return
+
+    # Always keep Chromium automation markers stripped in headless mode unless
+    # strict preset semantics request preserving a preset-provided value.
+    if force_disable_blink_automation:
+        cfg.disable_blink_automation = True
+
+    # Promote stealth defaults unless explicitly overridden by the caller.
+    if force_stealth:
+        cfg.stealth = True
+    if force_mask_devtools and cfg.stealth:
+        cfg.mask_devtools = True
+
+    # Keep channel aligned with hardened Chromium defaults when unset.
+    if cfg.browser_type == "chromium" and not cfg.channel:
+        cfg.channel = _default_channel_for_browser(cfg.browser_type)
+
+
+def _compute_headless_hardening_forces(
+    *,
+    explicit_stealth: bool,
+    explicit_mask_devtools: bool,
+    preset: Optional[Dict[str, Any]],
+    strict_preset: bool,
+) -> Tuple[bool, bool, bool]:
+    """Compute headless hardening force flags with optional strict preset semantics."""
+    strict_active = bool(strict_preset and preset)
+    preset = preset or {}
+    return (
+        not explicit_stealth and not (strict_active and "stealth" in preset),
+        not explicit_mask_devtools and not (strict_active and "mask_devtools" in preset),
+        not (strict_active and "disable_blink_automation" in preset),
+    )
+
+
+def _apply_cli_stealth_overrides(
+    cfg: "Config",
+    *,
+    stealth: bool,
+    stealth_devtools: bool,
+    no_stealth_devtools: bool,
+) -> Tuple[bool, bool]:
+    """Apply CLI stealth/devtools flags and return explicit override markers.
+
+    Returns:
+        (explicit_stealth, explicit_mask_devtools)
+    """
+    explicit_stealth = bool(stealth)
+    explicit_mask_devtools = bool(stealth or stealth_devtools or no_stealth_devtools)
+
+    if explicit_stealth:
+        cfg.stealth = True
+    if explicit_mask_devtools:
+        cfg.mask_devtools = (stealth and not no_stealth_devtools) or stealth_devtools
+
+    return explicit_stealth, explicit_mask_devtools
+
+
 @dataclass
 class BrowserState:
     """Browser state container."""
@@ -255,7 +338,7 @@ class Config:
 
     def __init__(
         self,
-        headless: bool = True,
+        headless: Optional[bool] = None,
         browser_type: str = "chromium",
         timeout: int = 30000,
         viewport_width: int = 1920,
@@ -299,17 +382,18 @@ class Config:
         fill_plugins: bool = True,
         override_languages: bool = True,
         stub_chrome_runtime: bool = True,
-        override_viewport: bool = True,
+        override_viewport: bool = False,
         force_devtools_closed: bool = True,
         apply_cdp_patch: bool = False,
-        disable_blink_automation: bool = False,
+        disable_blink_automation: bool = True,
+        strict_preset: bool = False,
     ):
-        self.headless = headless
+        self.headless = _default_headless_mode() if headless is None else headless
         self.browser_type = browser_type
         self.timeout = timeout
         self.viewport_width = viewport_width
         self.viewport_height = viewport_height
-        self.channel = channel
+        self.channel = channel if channel is not None else _default_channel_for_browser(browser_type)
         self.user_data_dir = user_data_dir
         self.cdp_endpoint = cdp_endpoint
         self.cdp_use_existing_context = cdp_use_existing_context
@@ -357,6 +441,8 @@ class Config:
         self.force_devtools_closed = force_devtools_closed
         self.apply_cdp_patch = apply_cdp_patch
         self.disable_blink_automation = disable_blink_automation
+        self.strict_preset = strict_preset
+        _apply_default_headless_hardening(self)
 
 
 # Global configuration
@@ -459,6 +545,73 @@ def _resolve_cdp_ws_endpoint(endpoint: str) -> str:
     return ws_endpoint
 
 
+def _should_strip_automation_markers(cfg: Config) -> bool:
+    """Whether launch flags should hide obvious automation markers."""
+    return cfg.browser_type == "chromium" and (
+        cfg.stealth or cfg.disable_blink_automation
+    )
+
+
+def _apply_automation_flag_hardening(launch_options: Dict[str, Any]):
+    """Mirror Playwright CLI assistant-mode launch behavior for Chromium."""
+    existing_ignored = list(launch_options.get("ignore_default_args") or [])
+    if "--enable-automation" not in existing_ignored:
+        existing_ignored.append("--enable-automation")
+    launch_options["ignore_default_args"] = existing_ignored
+
+    extra_args = list(launch_options.get("args", []))
+    if "--disable-blink-features=AutomationControlled" not in extra_args:
+        extra_args.append("--disable-blink-features=AutomationControlled")
+    launch_options["args"] = extra_args
+
+
+def _is_missing_channel_executable_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "executable doesn't exist" in message
+
+
+async def _launch_chromium_with_channel_fallback(
+    playwright: Playwright, launch_options: Dict[str, Any]
+) -> Browser:
+    """Launch Chromium and fall back from an unavailable channel to bundled Chromium."""
+    try:
+        return await playwright.chromium.launch(**launch_options)
+    except Exception as exc:
+        requested_channel = launch_options.get("channel")
+        if requested_channel and _is_missing_channel_executable_error(exc):
+            logger.warning(
+                "Channel '%s' is unavailable; retrying launch without a browser channel.",
+                requested_channel,
+            )
+            fallback_options = dict(launch_options)
+            fallback_options.pop("channel", None)
+            return await playwright.chromium.launch(**fallback_options)
+        raise
+
+
+async def _launch_chromium_persistent_with_channel_fallback(
+    playwright: Playwright, user_data_dir: str, launch_options: Dict[str, Any]
+) -> BrowserContext:
+    """Launch persistent Chromium context with fallback when channel binary is missing."""
+    try:
+        return await playwright.chromium.launch_persistent_context(
+            user_data_dir, **launch_options
+        )
+    except Exception as exc:
+        requested_channel = launch_options.get("channel")
+        if requested_channel and _is_missing_channel_executable_error(exc):
+            logger.warning(
+                "Channel '%s' is unavailable; retrying persistent launch without a browser channel.",
+                requested_channel,
+            )
+            fallback_options = dict(launch_options)
+            fallback_options.pop("channel", None)
+            return await playwright.chromium.launch_persistent_context(
+                user_data_dir, **fallback_options
+            )
+        raise
+
+
 def _playwright_object_guid(obj: Any) -> Optional[str]:
     impl = getattr(obj, "_impl_obj", None)
     return getattr(impl, "_guid", None)
@@ -553,9 +706,7 @@ async def _create_browser_state() -> BrowserState:
     cdp_created_context = False
 
     context_options: Dict[str, Any] = {}
-    disable_blink_flag = config.browser_type == "chromium" and (
-        config.stealth or config.disable_blink_automation
-    )
+    disable_blink_flag = _should_strip_automation_markers(config)
     if config.override_viewport:
         context_options["viewport"] = {
             "width": config.viewport_width,
@@ -621,18 +772,13 @@ async def _create_browser_state() -> BrowserState:
             if config.channel:
                 launch_options["channel"] = config.channel
             if disable_blink_flag:
-                existing_ignored = list(launch_options.get("ignore_default_args") or [])
-                if "--enable-automation" not in existing_ignored:
-                    existing_ignored.append("--enable-automation")
-                launch_options["ignore_default_args"] = existing_ignored
-                extra_args = list(launch_options.get("args", []))
-                if "--disable-blink-features=AutomationControlled" not in extra_args:
-                    extra_args.append("--disable-blink-features=AutomationControlled")
-                launch_options["args"] = extra_args
+                _apply_automation_flag_hardening(launch_options)
 
             if config.browser_type == "chromium":
-                context = await playwright.chromium.launch_persistent_context(
-                    config.user_data_dir, **launch_options
+                context = await _launch_chromium_persistent_with_channel_fallback(
+                    playwright,
+                    config.user_data_dir,
+                    launch_options,
                 )
             elif config.browser_type == "firefox":
                 context = await playwright.firefox.launch_persistent_context(
@@ -651,17 +797,12 @@ async def _create_browser_state() -> BrowserState:
             if config.channel:
                 launch_options["channel"] = config.channel
             if disable_blink_flag:
-                existing_ignored = list(launch_options.get("ignore_default_args") or [])
-                if "--enable-automation" not in existing_ignored:
-                    existing_ignored.append("--enable-automation")
-                launch_options["ignore_default_args"] = existing_ignored
-                extra_args = list(launch_options.get("args", []))
-                if "--disable-blink-features=AutomationControlled" not in extra_args:
-                    extra_args.append("--disable-blink-features=AutomationControlled")
-                launch_options["args"] = extra_args
+                _apply_automation_flag_hardening(launch_options)
 
             if config.browser_type == "chromium":
-                browser = await playwright.chromium.launch(**launch_options)
+                browser = await _launch_chromium_with_channel_fallback(
+                    playwright, launch_options
+                )
             elif config.browser_type == "firefox":
                 browser = await playwright.firefox.launch(**launch_options)
             elif config.browser_type == "webkit":
@@ -1607,6 +1748,9 @@ async def restart_browser(
             "headless": config.headless,
             "channel": config.channel,
             "user_data_dir": config.user_data_dir,
+            "stealth": config.stealth,
+            "mask_devtools": config.mask_devtools,
+            "disable_blink_automation": config.disable_blink_automation,
         }
 
         config.headless = not headed
@@ -1614,6 +1758,7 @@ async def restart_browser(
             config.channel = channel
         if user_data_dir is not None:
             config.user_data_dir = user_data_dir
+        _apply_default_headless_hardening(config)
 
         try:
             new_state = await _create_browser_state()
@@ -1661,6 +1806,7 @@ async def restart_browser(
 async def recreate_context(
     ctx: Context,
     antidetect_preset: Optional[str] = None,
+    strict_preset: Optional[bool] = None,
     headless: Optional[bool] = None,
     stealth: Optional[bool] = None,
     mask_devtools: Optional[bool] = None,
@@ -1695,6 +1841,15 @@ async def recreate_context(
     This closes the existing context and spins up a new one with the provided
     overrides applied at creation time (UA, client hints, languages/locale/timezone,
     device metrics, permissions, stealth/devtools masking, init scripts, and CDP attach mode).
+
+    Precedence model:
+    - Explicit runtime overrides in this call win first.
+    - If strict preset mode is enabled, preset-owned keys win over headless defaults.
+    - Headless default hardening fills remaining unset values.
+
+    strict_preset:
+    - When true and antidetect_preset is supplied, preset-owned keys are preserved
+      against headless default hardening.
     """
     async with _restart_lock:
         state = get_browser_state(ctx)
@@ -1702,6 +1857,7 @@ async def recreate_context(
         # Snapshot current config so we can roll back on failure.
         previous = {
             "headless": config.headless,
+            "strict_preset": config.strict_preset,
             "stealth": config.stealth,
             "mask_devtools": config.mask_devtools,
             "user_agent": config.user_agent,
@@ -1739,12 +1895,29 @@ async def recreate_context(
             if value is not None:
                 setattr(config, attr, value)
 
+        set_if(strict_preset, "strict_preset")
         set_if(headless, "headless")
         set_if(stealth, "stealth")
         if mask_devtools is not None:
             config.mask_devtools = mask_devtools
-        elif stealth is not None and config.mask_devtools is None:
+        elif stealth is not None:
             config.mask_devtools = stealth
+        (
+            force_stealth,
+            force_mask_devtools,
+            force_disable_blink_automation,
+        ) = _compute_headless_hardening_forces(
+            explicit_stealth=stealth is not None,
+            explicit_mask_devtools=mask_devtools is not None,
+            preset=preset,
+            strict_preset=config.strict_preset,
+        )
+        _apply_default_headless_hardening(
+            config,
+            force_stealth=force_stealth,
+            force_mask_devtools=force_mask_devtools,
+            force_disable_blink_automation=force_disable_blink_automation,
+        )
 
         set_if(user_agent, "user_agent")
         set_if(accept_language, "accept_language")
@@ -1846,7 +2019,9 @@ async def recreate_context(
             "cdp_close_browser": config.cdp_close_browser,
             "custom_init_script": bool(config.custom_init_script),
             "headless": config.headless,
+            "strict_preset": config.strict_preset,
             "antidetect_preset": antidetect_preset,
+            "disable_blink_automation": config.disable_blink_automation,
         }
 
         return {
@@ -1858,7 +2033,10 @@ async def recreate_context(
 
 @mcp.tool()
 async def apply_antidetect_preset(ctx: Context, preset: str = "pixelscan") -> Dict[str, Any]:
-    """Apply an anti-detect preset and rebuild the context."""
+    """Apply an anti-detect preset and rebuild the context.
+
+    Note: strict preset behavior can be toggled via recreate_context(strict_preset=...).
+    """
 
     return await recreate_context(ctx=ctx, antidetect_preset=preset)
 
@@ -1872,11 +2050,13 @@ async def get_effective_config(ctx: Context) -> Dict[str, Any]:
         "headless": config.headless,
         "browser_type": config.browser_type,
         "channel": config.channel,
+        "strict_preset": config.strict_preset,
         "cdp_endpoint": config.cdp_endpoint,
         "cdp_use_existing_context": config.cdp_use_existing_context,
         "cdp_close_browser": config.cdp_close_browser,
         "stealth": config.stealth,
         "mask_devtools": config.mask_devtools,
+        "disable_blink_automation": config.disable_blink_automation,
         "force_devtools_closed": config.force_devtools_closed,
         "apply_cdp_patch": config.apply_cdp_patch,
         "override_viewport": config.override_viewport,
@@ -4494,7 +4674,21 @@ def main():
     parser.add_argument(
         "--port", type=int, default=8000, help="Port for HTTP transport"
     )
-    parser.add_argument("--headed", action="store_true", help="Run in headed mode")
+    parser.set_defaults(headed=None)
+    parser.add_argument(
+        "--headed",
+        dest="headed",
+        action="store_const",
+        const=True,
+        help="Run in headed mode",
+    )
+    parser.add_argument(
+        "--headless",
+        dest="headed",
+        action="store_const",
+        const=False,
+        help="Run in headless mode",
+    )
     parser.add_argument(
         "--browser",
         choices=["chromium", "firefox", "webkit"],
@@ -4708,13 +4902,21 @@ def main():
     parser.add_argument(
         "--no-stealth-devtools",
         action="store_true",
-        help="Disable devtools/CDP masking when using --stealth",
+        help="Disable devtools/CDP masking (overrides preset/headless defaults)",
     )
     parser.add_argument(
         "--antidetect-preset",
         dest="antidetect_preset",
         choices=sorted(ANTIDETECT_PRESETS.keys()),
         help="Opt-in anti-detect fingerprint preset (e.g., pixelscan)",
+    )
+    parser.add_argument(
+        "--strict-preset",
+        action="store_true",
+        help=(
+            "When used with --antidetect-preset, preserve preset values against "
+            "headless default hardening (explicit CLI/runtime overrides still win)."
+        ),
     )
     parser.add_argument(
         "--init-script",
@@ -4743,14 +4945,18 @@ def main():
     preset = _get_antidetect_preset(args.antidetect_preset)
 
     # Update global configuration
-    config.headless = not args.headed
     if preset and "headless" in preset:
         config.headless = preset["headless"]
+    if args.headed is not None:
+        config.headless = not args.headed
     config.browser_type = args.browser
     config.timeout = args.timeout
-    config.channel = args.channel
-    if preset and "channel" in preset:
+    if args.channel is not None:
+        config.channel = args.channel
+    elif preset and "channel" in preset:
         config.channel = preset["channel"]
+    else:
+        config.channel = _default_channel_for_browser(config.browser_type)
     config.user_data_dir = getattr(args, "user_data_dir", None)
     config.cdp_endpoint = (args.cdp_endpoint.strip() if args.cdp_endpoint else None)
     if args.cdp_use_existing_context is not None:
@@ -4762,6 +4968,7 @@ def main():
     config.max_accessibility_nodes = args.max_accessibility_nodes
     config.max_response_characters = args.max_response_chars
     config.preview_characters = args.preview_chars
+    config.strict_preset = args.strict_preset
     # Compute per-session artifact directory under the provided base/root.
     artifact_base = Path(args.artifact_dir).expanduser().absolute()
     session_dir = _session_artifact_dir(artifact_base)
@@ -4803,9 +5010,28 @@ def main():
         config.sec_ch_ua_platform_version = args.sec_ch_ua_platform_version
     if args.sec_ch_ua_full_version_list is not None:
         config.sec_ch_ua_full_version_list = args.sec_ch_ua_full_version_list
-    if args.stealth or args.stealth_devtools or args.no_stealth_devtools:
-        config.stealth = args.stealth
-        config.mask_devtools = (args.stealth and not args.no_stealth_devtools) or args.stealth_devtools
+    explicit_stealth, explicit_mask_devtools = _apply_cli_stealth_overrides(
+        config,
+        stealth=args.stealth,
+        stealth_devtools=args.stealth_devtools,
+        no_stealth_devtools=args.no_stealth_devtools,
+    )
+    (
+        force_stealth,
+        force_mask_devtools,
+        force_disable_blink_automation,
+    ) = _compute_headless_hardening_forces(
+        explicit_stealth=explicit_stealth,
+        explicit_mask_devtools=explicit_mask_devtools,
+        preset=preset,
+        strict_preset=config.strict_preset,
+    )
+    _apply_default_headless_hardening(
+        config,
+        force_stealth=force_stealth,
+        force_mask_devtools=force_mask_devtools,
+        force_disable_blink_automation=force_disable_blink_automation,
+    )
     if args.grant_permissions is not None:
         config.grant_permissions = _parse_csv_list(args.grant_permissions)
     if args.permissions_origin is not None:

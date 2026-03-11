@@ -60,7 +60,7 @@ playwright-mcp stdio
 # Run with HTTP transport
 playwright-mcp http --port 8000
 
-# Run in headed mode (default is headless)
+# Run in headed mode (default on macOS/Windows; Linux without DISPLAY defaults to headless)
 playwright-mcp stdio --headed
 ```
 
@@ -80,8 +80,9 @@ playwright-mcp http --port 8000
 playwright-mcp stdio --browser firefox
 playwright-mcp stdio --browser webkit
 
-# Use real Chrome instead of bundled Chromium
-playwright-mcp stdio --channel chrome
+# Chrome channel is the default for Chromium sessions.
+# If Chrome isn't installed, the server falls back to bundled Chromium.
+playwright-mcp stdio
 
 # Use real Chrome with your profile (cookies, extensions, history)
 playwright-mcp stdio --channel chrome --user-data-dir "/Users/you/Library/Application Support/Google/Chrome"
@@ -109,7 +110,10 @@ playwright-mcp stdio --channel chrome-dev
 
 ### Stealth & Fingerprinting Controls
 
-- Built-in stealth preset: `--stealth` masks `navigator.webdriver`, stubs `chrome.runtime`, injects realistic plugins/mimeTypes, shims permissions, and masks devtools/CDP probes (disable the devtools masking with `--no-stealth-devtools`, or enable it standalone via `--stealth-devtools`).
+- Default baseline (no flags): Chromium launches with Chrome channel preference, strips `--enable-automation`, and adds `--disable-blink-features=AutomationControlled` to better match Playwright CLI assistant-mode behavior.
+- Headless baseline (default hardening): when `headless=true`, MCP now auto-enables `stealth` + devtools masking by default (while still respecting explicit runtime/CLI overrides).
+- Strict preset mode: `--strict-preset` keeps preset-owned keys from being overwritten by headless default hardening (explicit CLI/runtime overrides still win).
+- Built-in stealth preset: `--stealth` masks `navigator.webdriver`, stubs `chrome.runtime`, injects realistic plugins/mimeTypes, shims permissions, and masks devtools/CDP probes (disable devtools masking with `--no-stealth-devtools`, or enable it with `--stealth-devtools`).
 - CDP attach mode: `--cdp-endpoint [ENDPOINT]` enables CDP attach mode. If `ENDPOINT` is omitted, it defaults to `http://127.0.0.1:1234/json/version`. If this flag is not provided, MCP runs in normal launch mode. This is often more resilient when direct Playwright sessions are blocked or frequent captcha/WAF checks appear.
 - Runtime switch: use `recreate_context(cdp_endpoint="http://127.0.0.1:1234/json/version", cdp_use_existing_context=True)` to hot-switch into CDP mode, or pass `cdp_endpoint=""` to clear it and return to normal launch mode.
 - Init scripts: `--init-script ./hacks.js` injects your own JS via `context.add_init_script` before any page scripts execute.
@@ -119,11 +123,45 @@ playwright-mcp stdio --channel chrome-dev
 
 ### Anti-detect presets (opt-in)
 
-- Use a preset at startup: `--antidetect-preset pixelscan` or `--antidetect-preset clearance-safe` (opt-in, does not change defaults).
+- Use a preset at startup: `--antidetect-preset pixelscan` or `--antidetect-preset clearance-safe` (opt-in, layered on top of the default anti-detection baseline).
 - Apply at runtime via tools: `apply_antidetect_preset(preset="pixelscan")` / `apply_antidetect_preset(preset="clearance-safe")` or `recreate_context(antidetect_preset="...")`.
+- For strict preset semantics, combine with `--strict-preset` at startup or runtime `recreate_context(strict_preset=true, antidetect_preset="...")`.
 - `clearance-safe`: headed Chrome channel, removes only Playwright automation flags (`--disable-blink-features=AutomationControlled` + `--enable-automation` stripped), fixed viewport 1366x900, UA `Chrome/120` on macOS with `Accept-Language: en-US,en;q=0.9` and locale `en-US`, no stealth/CDP patch, leaves client hints and userAgentData native, no plugin/runtime stubs or devtools masking. Reserve this for Turnstile/WAF clearance runs.
 - `pixelscan`: headful, `stealth=True`, Chrome channel, CDP transport patch on; leaves viewport/language/chrome.runtime/plugins unspoofed; deletes `navigator.webdriver`; sets devtools sentinels to “closed”; uses native UA/CH/TZ unless overridden.
 - Validation (live, optional): `PIXELSCAN_RUN=1 PIXELSCAN_PRESET=pixelscan venv/bin/python -m pytest -s tests/test_pixelscan_botcheck.py` (hits pixelscan.net/bot-check).
+
+### Standard Anti-Detection Profiles (Team Playbook)
+
+Use these names consistently in runbooks, incidents, and experiments.
+
+1. `max_stealth` (highest anti-detection, slower/heavier): CDP attach to a real Chrome profile.
+2. `clearance` (strong WAF/challenge handling): headed + `clearance-safe` preset.
+3. `fast_headless` (best speed/throughput): headless with default hardening.
+
+Startup commands:
+
+```bash
+# 1) max_stealth
+/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=1234 --user-data-dir=/tmp/pwmcp_cdp_profile
+playwright-mcp stdio --cdp-endpoint
+
+# 2) clearance
+playwright-mcp stdio --antidetect-preset clearance-safe
+
+# 3) fast_headless
+playwright-mcp stdio --headless
+```
+
+Runtime equivalents (MCP tools):
+
+- `max_stealth`: `recreate_context(cdp_endpoint="http://127.0.0.1:1234/json/version", cdp_use_existing_context=True)`
+- `clearance`: `recreate_context(antidetect_preset="clearance-safe")`
+- `fast_headless`: `recreate_context(headless=True)` (headless hardening is auto-applied)
+
+Notes:
+
+- `fast_headless` now auto-enables hardened defaults (`stealth`, devtools masking, and blink automation stripping) unless explicitly overridden.
+- If a site still challenges in `fast_headless`, escalate to `clearance`, then to `max_stealth`.
 
 ### Integration with Claude Desktop
 
@@ -166,6 +204,13 @@ Tweak the caps per run with `--max-response-chars`, `--preview-chars`, and `--ar
 ## API Reference
 
 ### Tools
+
+#### Browser Lifecycle & Anti-Detect
+- `restart_browser(headed: bool = True, channel: str | None = None, user_data_dir: str | None = None)` - Restart browser process and optionally switch headed/headless, channel, or profile directory
+- `recreate_context(...)` - Rebuild browser context with fingerprint, anti-detect, permissions, viewport, init script, and CDP options
+- `recreate_context(strict_preset: bool = True, antidetect_preset: str = "...")` - Preserve preset-owned keys against headless default hardening
+- `apply_antidetect_preset(preset: str = "pixelscan")` - Apply preset and rebuild context (strict behavior follows current `strict_preset` setting)
+- `get_effective_config()` - Return effective browser/fingerprint settings, including `strict_preset`
 
 #### Navigation & Page Control
 - `navigate(url: str)` - Navigate to a URL
@@ -288,7 +333,8 @@ All existing tools automatically work on the currently active page. When you swi
 
 The server accepts the following configuration options:
 
-- `--headed` - Run browser in headed mode (headless is the default)
+- `--headed` / `--headless` - Force headed or headless mode (default is headed on macOS/Windows, headless on Linux without DISPLAY). Headless mode auto-enables hardened anti-detect defaults unless explicitly overridden.
+- `--strict-preset` - When combined with `--antidetect-preset`, preserve preset keys against headless default hardening (explicit overrides still win)
 - `--browser` - Browser type (chromium, firefox, webkit)
 - `--channel` - Browser channel (chrome, chrome-beta, msedge, etc.) for real browsers
 - `--user-data-dir` - Path to browser profile directory for persistent context
