@@ -176,6 +176,7 @@ Thumbs.db
 /test-results/
 /playwright-report/
 /playwright/.cache/
+/.playwright-cli/
 
 # MCP overflow artifacts
 tmp/

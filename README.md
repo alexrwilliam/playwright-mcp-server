@@ -60,7 +60,7 @@ playwright-mcp stdio
 # Run with HTTP transport
 playwright-mcp http --port 8000
 
-# Run in headed mode (default on macOS/Windows; Linux without DISPLAY defaults to headless)
+# Run in headed mode (default launch mode is headless)
 playwright-mcp stdio --headed
 ```
 
@@ -333,7 +333,7 @@ All existing tools automatically work on the currently active page. When you swi
 
 The server accepts the following configuration options:
 
-- `--headed` / `--headless` - Force headed or headless mode (default is headed on macOS/Windows, headless on Linux without DISPLAY). Headless mode auto-enables hardened anti-detect defaults unless explicitly overridden.
+- `--headed` / `--headless` - Force headed or headless mode (default is headless). Headless mode auto-enables hardened anti-detect defaults unless explicitly overridden.
 - `--strict-preset` - When combined with `--antidetect-preset`, preserve preset keys against headless default hardening (explicit overrides still win)
 - `--browser` - Browser type (chromium, firefox, webkit)
 - `--channel` - Browser channel (chrome, chrome-beta, msedge, etc.) for real browsers

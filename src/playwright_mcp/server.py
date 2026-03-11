@@ -46,8 +46,8 @@ DEFAULT_CDP_ENDPOINT = "http://127.0.0.1:1234/json/version"
 
 
 def _default_headless_mode() -> bool:
-    """Match Playwright CLI behavior: headed unless Linux has no DISPLAY."""
-    return sys.platform.startswith("linux") and not os.environ.get("DISPLAY")
+    """Use headless as the default launch mode for MCP sessions."""
+    return True
 
 
 def _default_channel_for_browser(browser_type: str) -> Optional[str]:
