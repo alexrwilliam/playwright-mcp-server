@@ -61,6 +61,8 @@ def list_tools():
         ("get_cookies", "Retrieve cookies from browser"),
         ("add_cookies", "Add cookies to browser"),
         ("clear_cookies", "Clear cookies from browser"),
+        ("load_storage_state", "Load Playwright storage_state from a file"),
+        ("save_storage_state", "Save Playwright storage_state to a file"),
         ("get_local_storage", "Get localStorage data"),
         ("set_local_storage", "Set localStorage item"),
         ("get_session_storage", "Get sessionStorage data"),
@@ -85,7 +87,7 @@ def list_tools():
         "Network Interception": ["intercept_route", "unroute_all"],
         "Page State": ["wait_for_load_state", "wait_for_network_idle", "set_viewport_size"],
         "Cookie Management": ["get_cookies", "add_cookies", "clear_cookies"],
-        "Storage Management": ["get_local_storage", "set_local_storage", "get_session_storage", "set_session_storage", "clear_storage"],
+        "Storage Management": ["load_storage_state", "save_storage_state", "get_local_storage", "set_local_storage", "get_session_storage", "set_session_storage", "clear_storage"],
         "Request Headers": ["set_extra_headers", "set_user_agent"]
     }
     

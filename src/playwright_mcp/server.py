@@ -296,6 +296,19 @@ class StorageResult(BaseModel):
     error: Optional[str] = None
 
 
+class StorageStateSummaryResult(BaseModel):
+    """Summary-only storage_state operation result."""
+
+    success: bool
+    path: Optional[str] = None
+    cookies_loaded: Optional[int] = None
+    origins_loaded: Optional[int] = None
+    cookies_saved: Optional[int] = None
+    origins_saved: Optional[int] = None
+    current_url: Optional[str] = None
+    error: Optional[str] = None
+
+
 class PageInfo(BaseModel):
     """Information about a browser page/tab."""
 
@@ -1502,6 +1515,211 @@ def _resolve_artifact_path(path: str) -> Path:
         raise FileNotFoundError("Artifact not found")
 
     return resolved_path
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    """Return whether ``path`` is equal to or contained by ``root``."""
+
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _storage_state_allowed_roots() -> List[Path]:
+    """Directories that storage_state tools may read from or write to."""
+
+    roots = [Path.cwd().expanduser().resolve()]
+    codex_root = (Path.home() / ".codex").expanduser().resolve()
+    if codex_root not in roots:
+        roots.append(codex_root)
+    return roots
+
+
+def _resolve_storage_state_path(path: str, *, for_write: bool = False) -> Path:
+    """Resolve a storage_state path without allowing arbitrary filesystem access."""
+
+    if not path or not path.strip():
+        raise ValueError("Storage state path is required")
+
+    raw_path = Path(path).expanduser()
+    candidate = raw_path if raw_path.is_absolute() else Path.cwd() / raw_path
+    try:
+        resolved_path = candidate.resolve(strict=False)
+    except RuntimeError as exc:
+        raise ValueError(f"Invalid storage state path: {path}") from exc
+
+    allowed_roots = _storage_state_allowed_roots()
+    if not any(_path_is_within(resolved_path, root) for root in allowed_roots):
+        raise PermissionError(f"Storage state path is outside allowed directories: {path}")
+
+    if for_write:
+        parent = resolved_path.parent.resolve(strict=False)
+        if not any(_path_is_within(parent, root) for root in allowed_roots):
+            raise PermissionError(f"Storage state path is outside allowed directories: {path}")
+        parent.mkdir(parents=True, exist_ok=True)
+    else:
+        if not resolved_path.exists():
+            raise FileNotFoundError(f"Storage state file not found: {path}")
+        if not resolved_path.is_file():
+            raise ValueError(f"Storage state path is not a file: {path}")
+
+    return resolved_path
+
+
+def _load_storage_state_file(path: Path) -> Dict[str, Any]:
+    """Read and validate the top-level Playwright storage_state JSON structure."""
+
+    with path.open("r", encoding="utf-8") as handle:
+        storage_state = json.load(handle)
+
+    if not isinstance(storage_state, dict):
+        raise ValueError("Storage state file must contain a JSON object")
+
+    cookies = storage_state.get("cookies", [])
+    origins = storage_state.get("origins", [])
+    if cookies is None:
+        cookies = []
+    if origins is None:
+        origins = []
+    if not isinstance(cookies, list):
+        raise ValueError("Storage state cookies must be a list")
+    if not isinstance(origins, list):
+        raise ValueError("Storage state origins must be a list")
+
+    storage_state["cookies"] = cookies
+    storage_state["origins"] = origins
+    return storage_state
+
+
+def _normalize_storage_origin(origin_url: str) -> str:
+    """Normalize a URL or origin string to an HTTP(S) origin."""
+
+    parsed = urlparse(origin_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError(f"Unsupported storage origin: {origin_url}")
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _prepare_storage_origins(
+    origins: List[Any],
+    origin_urls: Optional[List[str]],
+) -> List[Tuple[str, List[Dict[str, str]]]]:
+    """Validate and optionally filter storage_state origins."""
+
+    allowed_origins = None
+    if origin_urls is not None:
+        allowed_origins = {
+            _normalize_storage_origin(origin_url) for origin_url in origin_urls
+        }
+
+    prepared: List[Tuple[str, List[Dict[str, str]]]] = []
+    for origin_entry in origins:
+        if not isinstance(origin_entry, dict):
+            raise ValueError("Each storage state origin must be an object")
+
+        origin = origin_entry.get("origin")
+        if not isinstance(origin, str):
+            raise ValueError("Each storage state origin must include an origin string")
+        normalized_origin = _normalize_storage_origin(origin)
+        if allowed_origins is not None and normalized_origin not in allowed_origins:
+            continue
+
+        local_storage = origin_entry.get("localStorage", [])
+        if local_storage is None:
+            local_storage = []
+        if not isinstance(local_storage, list):
+            raise ValueError(f"localStorage for {normalized_origin} must be a list")
+
+        validated_items: List[Dict[str, str]] = []
+        for item in local_storage:
+            if not isinstance(item, dict):
+                raise ValueError(
+                    f"localStorage entries for {normalized_origin} must be objects"
+                )
+            name = item.get("name")
+            value = item.get("value")
+            if not isinstance(name, str) or not isinstance(value, str):
+                raise ValueError(
+                    f"localStorage entries for {normalized_origin} must contain "
+                    "string name and value"
+                )
+            validated_items.append({"name": name, "value": value})
+
+        if validated_items:
+            prepared.append((normalized_origin, validated_items))
+
+    return prepared
+
+
+def _untrack_page(state: BrowserState, page: Page) -> None:
+    """Remove an internal temporary page from page tracking."""
+
+    removed_current = False
+    for page_id, tracked_page in list(state.pages.items()):
+        if _is_same_playwright_object(tracked_page, page):
+            removed_current = removed_current or state.current_page_id == page_id
+            del state.pages[page_id]
+
+    if removed_current:
+        state.current_page_id = None
+
+    if not state.current_page_id and state.pages:
+        state.current_page_id = next(iter(state.pages))
+        state.page = state.pages[state.current_page_id]
+
+
+async def _apply_local_storage_for_origin(
+    state: BrowserState,
+    origin: str,
+    local_storage: List[Dict[str, str]],
+) -> None:
+    """Seed localStorage for a single origin without loading the real site."""
+
+    page = await state.context.new_page()
+    page.set_default_timeout(config.timeout)
+
+    async def fulfill_blank_page(route):
+        if route.request.resource_type == "document":
+            await route.fulfill(
+                status=200,
+                content_type="text/html",
+                body="<html><head><title>storage-state</title></head><body></body></html>",
+            )
+        else:
+            await route.fulfill(status=204, body="")
+
+    try:
+        await page.route("**/*", fulfill_blank_page)
+        await page.goto(origin, wait_until="domcontentloaded", timeout=config.timeout)
+        await page.evaluate(
+            """
+            (items) => {
+                for (const item of items) {
+                    localStorage.setItem(item.name, item.value);
+                }
+            }
+            """,
+            local_storage,
+        )
+    finally:
+        try:
+            await page.close()
+        except Exception as exc:
+            logger.debug("Failed to close temporary storage_state page: %s", exc)
+        _untrack_page(state, page)
+        await asyncio.sleep(0)
+        _untrack_page(state, page)
+
+
+def _current_url_for_summary(ctx: Context) -> Optional[str]:
+    """Return the active page URL for summary responses."""
+
+    try:
+        return get_current_page(ctx).url
+    except Exception:
+        return None
 
 
 def _is_probably_binary(data: bytes) -> bool:
@@ -4438,6 +4656,155 @@ async def clear_cookies(
         return CookieResult(success=True, cookies=[{"cleared_filter": clear_filter}])
     except Exception as e:
         return CookieResult(success=False, error=str(e))
+
+
+@mcp.tool()
+async def load_storage_state(
+    path: str,
+    ctx: Context,
+    origin_urls: Optional[List[str]] = None,
+) -> StorageStateSummaryResult:
+    """Load a Playwright storage_state JSON file into the current context.
+
+    The response intentionally returns only counts and metadata. Cookie values,
+    auth tokens, and localStorage values from the file are never returned.
+
+    Args:
+        path: Storage-state JSON path. Relative paths resolve from server cwd.
+        origin_urls: Optional URL/origin allowlist for localStorage origins.
+        ctx: MCP context containing the browser state
+
+    Returns:
+        Summary with success status, loaded counts, current URL, and any error
+    """
+    resolved_path: Optional[Path] = None
+    try:
+        resolved_path = _resolve_storage_state_path(path)
+        storage_state = _load_storage_state_file(resolved_path)
+
+        cookies = storage_state.get("cookies", [])
+        origins = storage_state.get("origins", [])
+        for cookie in cookies:
+            if not isinstance(cookie, dict):
+                raise ValueError("Storage state cookies must be objects")
+
+        prepared_origins = _prepare_storage_origins(origins, origin_urls)
+        browser_state = get_browser_state(ctx)
+
+        if cookies:
+            try:
+                await browser_state.context.add_cookies(cookies)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to apply cookies from storage_state file %s: %s",
+                    resolved_path,
+                    type(exc).__name__,
+                )
+                return StorageStateSummaryResult(
+                    success=False,
+                    path=str(resolved_path),
+                    error=(
+                        "Failed to apply cookies from storage state at "
+                        f"{resolved_path}"
+                    ),
+                )
+
+        origins_loaded = 0
+        for origin, local_storage in prepared_origins:
+            try:
+                await _apply_local_storage_for_origin(
+                    browser_state,
+                    origin,
+                    local_storage,
+                )
+                origins_loaded += 1
+            except Exception as exc:
+                logger.warning(
+                    "Failed to apply localStorage for origin %s from %s: %s",
+                    origin,
+                    resolved_path,
+                    type(exc).__name__,
+                )
+                return StorageStateSummaryResult(
+                    success=False,
+                    path=str(resolved_path),
+                    error=(
+                        "Failed to apply localStorage for origin "
+                        f"{origin} from storage state at {resolved_path}"
+                    ),
+                )
+
+        return StorageStateSummaryResult(
+            success=True,
+            path=str(resolved_path),
+            cookies_loaded=len(cookies),
+            origins_loaded=origins_loaded,
+            current_url=_current_url_for_summary(ctx),
+        )
+    except (FileNotFoundError, PermissionError, ValueError, json.JSONDecodeError) as exc:
+        return StorageStateSummaryResult(
+            success=False,
+            path=str(resolved_path) if resolved_path else path,
+            error=str(exc),
+        )
+    except Exception as exc:
+        logger.exception("Failed to load storage_state from %s: %s", path, exc)
+        return StorageStateSummaryResult(
+            success=False,
+            path=str(resolved_path) if resolved_path else path,
+            error=f"Failed to load storage state from {path}",
+        )
+
+
+@mcp.tool()
+async def save_storage_state(
+    path: str,
+    ctx: Context,
+) -> StorageStateSummaryResult:
+    """Save the current browser context storage_state to a local JSON file.
+
+    The response intentionally returns only counts and metadata. Cookie values,
+    auth tokens, and localStorage values are written server-side and are never
+    returned in the tool response.
+
+    Args:
+        path: Destination JSON path. Relative paths resolve from server cwd.
+        ctx: MCP context containing the browser state
+
+    Returns:
+        Summary with success status, saved counts, current URL, and any error
+    """
+    resolved_path: Optional[Path] = None
+    try:
+        resolved_path = _resolve_storage_state_path(path, for_write=True)
+        browser_state = get_browser_state(ctx)
+        storage_state = await browser_state.context.storage_state(path=str(resolved_path))
+
+        cookies = storage_state.get("cookies", [])
+        origins = storage_state.get("origins", [])
+        cookies_saved = len(cookies) if isinstance(cookies, list) else 0
+        origins_saved = len(origins) if isinstance(origins, list) else 0
+
+        return StorageStateSummaryResult(
+            success=True,
+            path=str(resolved_path),
+            cookies_saved=cookies_saved,
+            origins_saved=origins_saved,
+            current_url=_current_url_for_summary(ctx),
+        )
+    except (PermissionError, ValueError, OSError) as exc:
+        return StorageStateSummaryResult(
+            success=False,
+            path=str(resolved_path) if resolved_path else path,
+            error=str(exc),
+        )
+    except Exception as exc:
+        logger.exception("Failed to save storage_state to %s: %s", path, exc)
+        return StorageStateSummaryResult(
+            success=False,
+            path=str(resolved_path) if resolved_path else path,
+            error=f"Failed to save storage state to {path}",
+        )
 
 
 # Storage Management Tools

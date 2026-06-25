@@ -295,6 +295,8 @@ Tweak the caps per run with `--max-response-chars`, `--preview-chars`, and `--ar
 - `clear_cookies(name: str, domain: str)` - Clear cookies with optional filtering
 
 #### Storage Management
+- `load_storage_state(path: str, origin_urls: List[str] | None = None)` - Load a Playwright `storage_state` JSON file into the current browser context; returns only counts/metadata, never cookie or localStorage values
+- `save_storage_state(path: str)` - Save the current browser context `storage_state` to a file; returns only counts/metadata, never cookie or localStorage values
 - `get_local_storage(origin: str)` - Access localStorage data
 - `set_local_storage(key: str, value: str)` - Set localStorage items
 - `get_session_storage()` - Access sessionStorage data
